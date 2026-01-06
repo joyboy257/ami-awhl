@@ -2,7 +2,7 @@
 -- Purpose: HTTP fetch log and page content storage (html + markdown)
 -- Source: pipeline_strategy.md §2.5, §2.6
 -- Idempotent: Yes (IF NOT EXISTS)
--- Depends on: wellness.pages, wellness.domains
+-- Depends on: wellness.pages, wellness.domains (id must exist)
 
 CREATE TABLE IF NOT EXISTS wellness.http_fetches (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

@@ -31,13 +31,13 @@
 | T-107 | Create 007_vertical_services.sql | vertical_services table | T-101 | [x] File exists |
 | T-108 | Create 008_serp_snapshots_results.sql | serp_snapshots, serp_results | T-106 | [x] File exists |
 | T-109 | Create 009_http_fetches_page_storage.sql | http_fetches, page_html, page_content | T-104 | [x] File exists |
-| T-110 | Apply all migrations | Run 001–009 against Postgres | T-109 | `\dt wellness.*` OK |
-| T-111 | Verify pgcrypto | `SELECT gen_random_uuid()` | T-110 | UUID returned |
-| T-112 | Backfill domains | Insert domains from existing pages.url | T-110 | Rows inserted |
-| T-113 | Backfill pages.domain_id | UPDATE pages SET domain_id FROM domains | T-112 | 0 nulls |
-| T-114 | Create assert_schema.sql | Schema validation queries | T-110 | File + passes |
-| T-115 | Create assert_uniques.sql | Uniqueness checks | T-114 | File + passes |
-| T-116 | Create assert_queue_contract.sql | Jobs lock columns exist | T-114 | File + passes |
+| T-110 | Apply all migrations | Run 001–009 against Postgres | T-109 | [x] `\dt wellness.*` OK |
+| T-111 | Verify pgcrypto | `SELECT gen_random_uuid()` | T-110 | [x] UUID returned |
+| T-112 | Backfill domains | Insert domains from existing pages.url | T-110 | [x] Rows inserted |
+| T-113 | Backfill pages.domain_id | UPDATE pages SET domain_id FROM domains | T-112 | [x] 0 nulls |
+| T-114 | Create assert_schema.sql | Schema validation queries | T-110 | [x] File + passes |
+| T-115 | Create assert_uniques.sql | Uniqueness checks | T-114 | [x] File + passes |
+| T-116 | Create assert_queue_contract.sql | Jobs lock columns exist | T-114 | [x] File + passes |
 | T-117 | Build robots microservice | Docker container for parsing | T-110 | Container runs |
 | T-118 | Test robots microservice | POST request returns decision | T-117 | JSON response |
 
