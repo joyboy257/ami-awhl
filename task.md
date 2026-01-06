@@ -4,17 +4,17 @@
 
 | ID | Title | Description | Deps | Validation |
 | :--- | :--- | :--- | :--- | :--- |
-| T-000 | Confirm repo root | `pwd` shows awhl-market-intel | — | Path correct |
-| T-001 | Verify Git installed | `git --version` | — | Version printed |
-| T-002 | Check git init status | `ls -la .git` | T-001 | .git exists |
-| T-003 | Init git if needed | `git init` (only if T-002 fails) | T-002 | .git exists |
-| T-004 | Rename branch to main | `git branch -M main` | T-003 | Branch is main |
-| T-005 | Configure identity | `git config user.name/email` | T-004 | Config shows values |
-| T-006 | Check remote | `git remote -v` | T-005 | Show current remote |
-| T-007 | Set/update remote | `git remote add/set-url origin` | T-006 | Remote matches GitHub |
-| T-008 | Verify .gitignore | Check exists or create minimal | T-007 | File exists |
-| T-009 | Initial commit | `git add . && git commit` | T-008 | Commit hash shown |
-| T-010 | Push to main | `git push -u origin main` | T-009 | Remote updated |
+| T-000 | Confirm repo root | `pwd` shows awhl-market-intel | — | [x] Path correct |
+| T-001 | Verify Git installed | `git --version` | — | [x] Version printed |
+| T-002 | Check git init status | `ls -la .git` | T-001 | [x] .git exists |
+| T-003 | Init git if needed | `git init` (only if T-002 fails) | T-002 | [x] .git exists |
+| T-004 | Rename branch to main | `git branch -M main` | T-003 | [x] Branch is main |
+| T-005 | Configure identity | `git config user.name/email` | T-004 | [x] Config shows values |
+| T-006 | Check remote | `git remote -v` | T-005 | [x] Show current remote |
+| T-007 | Set/update remote | `git remote add/set-url origin` | T-006 | [x] Remote matches GitHub |
+| T-008 | Verify .gitignore | Check exists or create minimal | T-007 | [x] File exists |
+| T-009 | Initial commit | `git add . && git commit` | T-008 | [x] Commit hash shown |
+| T-010 | Push to main | `git push -u origin main` | T-009 | [x] Remote updated |
 
 ---
 
