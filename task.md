@@ -22,15 +22,15 @@
 
 | ID | Title | Description | Deps | Validation |
 | :--- | :--- | :--- | :--- | :--- |
-| T-101 | Create 001_pgcrypto.sql | `CREATE EXTENSION IF NOT EXISTS pgcrypto` | T-010 | File exists |
-| T-102 | Create 002_jobs.sql | Jobs table DDL | T-101 | File exists |
-| T-103 | Create 003_domains.sql | Domains table DDL | T-101 | File exists |
-| T-104 | Create 004_pages_alter.sql | Add domain_id, sitemap_lastmod, etc. | T-103 | File exists |
-| T-105 | Create 005_sitemaps_alter.sql | Add locking + depth columns | T-101 | File exists |
-| T-106 | Create 006_serp_profiles_keywords.sql | serp_profiles, keywords, geo_sets, templates | T-103 | File exists |
-| T-107 | Create 007_vertical_services.sql | vertical_services table | T-101 | File exists |
-| T-108 | Create 008_serp_snapshots_results.sql | serp_snapshots, serp_results | T-106 | File exists |
-| T-109 | Create 009_http_fetches_page_storage.sql | http_fetches, page_html, page_content | T-104 | File exists |
+| T-101 | Create 001_pgcrypto.sql | `CREATE EXTENSION IF NOT EXISTS pgcrypto` | T-010 | [x] File exists |
+| T-102 | Create 002_jobs.sql | Jobs table DDL | T-101 | [x] File exists |
+| T-103 | Create 003_domains.sql | Domains table DDL | T-101 | [x] File exists |
+| T-104 | Create 004_pages_alter.sql | Add domain_id, sitemap_lastmod, etc. | T-103 | [x] File exists |
+| T-105 | Create 005_sitemaps_alter.sql | Add locking + depth columns | T-101 | [x] File exists |
+| T-106 | Create 006_serp_profiles_keywords.sql | serp_profiles, keywords, geo_sets, templates | T-103 | [x] File exists |
+| T-107 | Create 007_vertical_services.sql | vertical_services table | T-101 | [x] File exists |
+| T-108 | Create 008_serp_snapshots_results.sql | serp_snapshots, serp_results | T-106 | [x] File exists |
+| T-109 | Create 009_http_fetches_page_storage.sql | http_fetches, page_html, page_content | T-104 | [x] File exists |
 | T-110 | Apply all migrations | Run 001–009 against Postgres | T-109 | `\dt wellness.*` OK |
 | T-111 | Verify pgcrypto | `SELECT gen_random_uuid()` | T-110 | UUID returned |
 | T-112 | Backfill domains | Insert domains from existing pages.url | T-110 | Rows inserted |
