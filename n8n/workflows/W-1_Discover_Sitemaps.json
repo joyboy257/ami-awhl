@@ -11,14 +11,14 @@
             "type": "n8n-nodes-base.webhook",
             "typeVersion": 1,
             "position": [
-                100,
+                0,
                 300
             ]
         },
         {
             "parameters": {
                 "operation": "executeQuery",
-                "query": "SELECT \n    cd.domain as domain_text,\n    d.id as domain_id\nFROM wellness.clinic_domains cd\nLEFT JOIN wellness.domains d ON cd.domain = d.domain\nWHERE cd.clinic_id = $1",
+                "query": "SELECT cd.domain as domain_text, cd.clinic_id FROM wellness.clinic_domains cd WHERE cd.clinic_id = $1",
                 "parameters": "={{ $json.clinic_id }}"
             },
             "id": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
@@ -26,7 +26,7 @@
             "type": "n8n-nodes-base.postgres",
             "typeVersion": 1,
             "position": [
-                300,
+                200,
                 300
             ]
         },
@@ -54,15 +54,16 @@
             "type": "n8n-nodes-base.httpRequest",
             "typeVersion": 4,
             "position": [
-                500,
-                200
+                400,
+                100
             ]
         },
         {
             "parameters": {
-                "url": "={{ 'https://' + $node[\"Get Domains\"].json.domain_text + '/robots.txt' }}",
+                "url": "={{ 'https://' + $json.domain_text + '/robots.txt' }}",
                 "options": {
-                    "ignoreHttpStatusErrors": true
+                    "ignoreHttpStatusErrors": true,
+                    "fullResponse": true
                 }
             },
             "id": "c3d4e5f6-a7b8-4c9d-0e1f-2a3b4c5d6e7f",
@@ -70,69 +71,88 @@
             "type": "n8n-nodes-base.httpRequest",
             "typeVersion": 4,
             "position": [
-                500,
-                400
+                400,
+                300
             ]
         },
         {
             "parameters": {
-                "jsCode": "const sitemaps = [];\nconst robotsText = $json.data || '';\nconst lines = robotsText.split('\\n');\n\nfor (const line of lines) {\n    const trimLine = line.trim();\n    if (trimLine.toLowerCase().startsWith('sitemap:')) {\n        const url = trimLine.substring(8).trim();\n        if (url) {\n            sitemaps.push({ url });\n        }\n    }\n}\n\nreturn sitemaps;"
+                "jsCode": "const sitemaps = [];\nconst robotsText = $json.body || '';\nconst lines = robotsText.split(/\\r?\\n/);\n\nfor (let line of lines) {\n    line = line.trim();\n    if (line.toLowerCase().startsWith('sitemap:')) {\n        const url = line.substring(8).trim();\n        if (url) {\n            sitemaps.push({ \n                url, \n                source: 'robots.txt' \n            });\n        }\n    }\n}\n\nreturn sitemaps;"
             },
             "id": "d4e5f6a7-b8c9-4d0e-1f2a-3b4c5d6e7f8a",
-            "name": "Extract Sitemaps from Robots",
+            "name": "Extract Robots Sitemaps",
             "type": "n8n-nodes-base.code",
             "typeVersion": 2,
             "position": [
-                700,
-                400
+                600,
+                300
             ]
         },
         {
             "parameters": {
-                "jsCode": "const domain = $node[\"Get Domains\"].json.domain_text;\nreturn [\n    { url: `https://${domain}/sitemap.xml` },\n    { url: `https://${domain}/sitemap_index.xml` },\n    { url: `https://${domain}/sitemap-index.xml` }\n];"
+                "jsCode": "const domain = $node[\"Get Domains\"].json.domain_text;\nreturn [\n    { url: `https://${domain}/sitemap.xml`, source: 'guess' },\n    { url: `https://${domain}/sitemap_index.xml`, source: 'guess' },\n    { url: `https://${domain}/sitemap-index.xml`, source: 'guess' }\n];"
             },
             "id": "e5f6a7b8-c9d0-4e1f-2a3b-4c5d6e7f8a9b",
             "name": "Guess List",
             "type": "n8n-nodes-base.code",
             "typeVersion": 2,
             "position": [
-                700,
-                600
+                600,
+                500
             ]
         },
         {
             "parameters": {
-                "operation": "mergeByItem",
-                "resolve": "fieldsOnly",
-                "fieldsToMatch": {
-                    "fields": [
-                        {
-                            "name": "url"
-                        }
-                    ]
-                }
+                "mode": "combine",
+                "combineBy": "all"
             },
             "id": "f6a7b8c9-d0e1-4f2a-3b4c-5d6e7f8a9b0c",
-            "name": "Merge Sitemaps",
+            "name": "Merge Candidates",
             "type": "n8n-nodes-base.merge",
             "typeVersion": 3,
             "position": [
-                900,
+                800,
+                400
+            ]
+        },
+        {
+            "parameters": {
+                "jsCode": "const unique = new Map();\nconst allItems = $input.all();\nconst clinic_id = $node[\"Webhook\"].json.clinic_id;\n\nfor (const item of allItems) {\n    const url = item.json.url;\n    if (url && !unique.has(url)) {\n        unique.set(url, { ...item.json, clinic_id });\n    }\n}\n\nreturn Array.from(unique.values()).map(json => ({ json }));"
+            },
+            "id": "a7b8c9d0-e1f2-4a3b-b4c5-d6e7f8a9b0c1",
+            "name": "Dedupe Sitemaps",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1000,
                 400
             ]
         },
         {
             "parameters": {
                 "operation": "executeQuery",
-                "query": "INSERT INTO wellness.sitemaps (clinic_id, url, depth)\nVALUES ($1, $2, 0)\nON CONFLICT (clinic_id, url) DO NOTHING;",
-                "parameters": "={{ [ $node[\"Webhook\"].json.clinic_id, $json.url ] }}"
+                "query": "INSERT INTO wellness.sitemaps (clinic_id, url, depth)\nVALUES ($1, $2, 0)\nON CONFLICT (clinic_id, url) DO NOTHING\nRETURNING 1 as inserted;",
+                "parameters": "={{ [ $json.clinic_id, $json.url ] }}"
             },
-            "id": "a7b8c9d0-e1f2-4a3b-b4c5-d6e7f8a9b0c1",
+            "id": "b4c5d6e7-f8a9-b0c1-d2e3-f4a5b6c7d8e9",
             "name": "UPSERT Sitemaps",
             "type": "n8n-nodes-base.postgres",
             "typeVersion": 1,
             "position": [
-                1100,
+                1200,
+                400
+            ]
+        },
+        {
+            "parameters": {
+                "jsCode": "const results = $input.all();\nconst totalDiscovered = results.length;\nconst totalInserted = results.filter(r => r.json.inserted === 1).length;\nconst bySource = results.reduce((acc, r) => {\n    const source = r.json.source || 'unknown';\n    acc[source] = (acc[source] || 0) + 1;\n    return acc;\n}, {});\n\nreturn [{\n    json: {\n        clinic_id: $node[\"Webhook\"].json.clinic_id,\n        total_discovered: totalDiscovered,\n        total_inserted: totalInserted,\n        by_source: bySource,\n        timestamp: new Date().toISOString()\n    }\n}];"
+            },
+            "id": "c1d2e3f4-a5b6-c7d8-e9f0-a1b2c3d4e5f6",
+            "name": "Execution Summary",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1400,
                 400
             ]
         }
@@ -170,33 +190,22 @@
                 ]
             ]
         },
-        "Robots Service Check": {
-            "main": [
-                [
-                    {
-                        "node": "Merge Sitemaps",
-                        "type": "main",
-                        "index": 0
-                    }
-                ]
-            ]
-        },
         "Fetch robots.txt Manually": {
             "main": [
                 [
                     {
-                        "node": "Extract Sitemaps from Robots",
+                        "node": "Extract Robots Sitemaps",
                         "type": "main",
                         "index": 0
                     }
                 ]
             ]
         },
-        "Extract Sitemaps from Robots": {
+        "Extract Robots Sitemaps": {
             "main": [
                 [
                     {
-                        "node": "Merge Sitemaps",
+                        "node": "Merge Candidates",
                         "type": "main",
                         "index": 0
                     }
@@ -207,18 +216,40 @@
             "main": [
                 [
                     {
-                        "node": "Merge Sitemaps",
+                        "node": "Merge Candidates",
+                        "type": "main",
+                        "index": 1
+                    }
+                ]
+            ]
+        },
+        "Merge Candidates": {
+            "main": [
+                [
+                    {
+                        "node": "Dedupe Sitemaps",
                         "type": "main",
                         "index": 0
                     }
                 ]
             ]
         },
-        "Merge Sitemaps": {
+        "Dedupe Sitemaps": {
             "main": [
                 [
                     {
                         "node": "UPSERT Sitemaps",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "UPSERT Sitemaps": {
+            "main": [
+                [
+                    {
+                        "node": "Execution Summary",
                         "type": "main",
                         "index": 0
                     }
