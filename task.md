@@ -38,7 +38,7 @@
 | T-114 | Create assert_schema.sql | Schema validation queries | T-110 | [x] File + passes |
 | T-115 | Create assert_uniques.sql | Uniqueness checks | T-114 | [x] File + passes |
 | T-116 | Create assert_queue_contract.sql | Jobs lock columns exist | T-114 | [x] File + passes |
-| T-117 | Build robots microservice | Docker container for parsing | T-110 | Container runs |
+| T-117 | Build robots microservice | Docker container for parsing | T-110 | [x] Container runs |
 | T-118 | Test robots microservice | POST request returns decision | T-117 | JSON response |
 
 ---
