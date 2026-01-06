@@ -47,7 +47,7 @@
 
 | ID | Title | Description | Deps | Validation |
 | :--- | :--- | :--- | :--- | :--- |
-| T-201 | Build W-1 Discover Sitemaps | Robots + guess logic | T-118 | Workflow JSON |
+| T-201 | Build W-1 Discover Sitemaps | Robots + guess logic | T-118 | [/] Workflow JSON |
 | T-202 | Build W-2 Expand Sitemap | Parse XML, depth limit, batch | T-201 | Workflow JSON |
 | T-203 | Build O-Sweeper (sitemaps) | Reclaim stuck sitemaps | T-202 | Workflow JSON |
 | T-204 | Add fixtures: sitemaps | tests/fixtures/sitemaps/*.xml | T-201 | Files exist |

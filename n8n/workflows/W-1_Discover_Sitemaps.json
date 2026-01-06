@@ -1,0 +1,229 @@
+{
+    "name": "W-1_Discover_Sitemaps",
+    "nodes": [
+        {
+            "parameters": {
+                "path": "discover-sitemaps",
+                "options": {}
+            },
+            "id": "e6f49e1e-436e-4f51-a20c-03d3f9e9f901",
+            "name": "Webhook",
+            "type": "n8n-nodes-base.webhook",
+            "typeVersion": 1,
+            "position": [
+                100,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "SELECT \n    cd.domain as domain_text,\n    d.id as domain_id\nFROM wellness.clinic_domains cd\nLEFT JOIN wellness.domains d ON cd.domain = d.domain\nWHERE cd.clinic_id = $1",
+                "parameters": "={{ $json.clinic_id }}"
+            },
+            "id": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
+            "name": "Get Domains",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 1,
+            "position": [
+                300,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "method": "POST",
+                "url": "http://robots-service:8000/check",
+                "sendBody": true,
+                "bodyParameters": {
+                    "parameters": [
+                        {
+                            "name": "url",
+                            "value": "={{ 'https://' + $json.domain_text + '/' }}"
+                        },
+                        {
+                            "name": "robots_txt_url",
+                            "value": "={{ 'https://' + $json.domain_text + '/robots.txt' }}"
+                        }
+                    ]
+                },
+                "options": {}
+            },
+            "id": "b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e",
+            "name": "Robots Service Check",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                500,
+                200
+            ]
+        },
+        {
+            "parameters": {
+                "url": "={{ 'https://' + $node[\"Get Domains\"].json.domain_text + '/robots.txt' }}",
+                "options": {
+                    "ignoreHttpStatusErrors": true
+                }
+            },
+            "id": "c3d4e5f6-a7b8-4c9d-0e1f-2a3b4c5d6e7f",
+            "name": "Fetch robots.txt Manually",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                500,
+                400
+            ]
+        },
+        {
+            "parameters": {
+                "jsCode": "const sitemaps = [];\nconst robotsText = $json.data || '';\nconst lines = robotsText.split('\\n');\n\nfor (const line of lines) {\n    const trimLine = line.trim();\n    if (trimLine.toLowerCase().startsWith('sitemap:')) {\n        const url = trimLine.substring(8).trim();\n        if (url) {\n            sitemaps.push({ url });\n        }\n    }\n}\n\nreturn sitemaps;"
+            },
+            "id": "d4e5f6a7-b8c9-4d0e-1f2a-3b4c5d6e7f8a",
+            "name": "Extract Sitemaps from Robots",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                700,
+                400
+            ]
+        },
+        {
+            "parameters": {
+                "jsCode": "const domain = $node[\"Get Domains\"].json.domain_text;\nreturn [\n    { url: `https://${domain}/sitemap.xml` },\n    { url: `https://${domain}/sitemap_index.xml` },\n    { url: `https://${domain}/sitemap-index.xml` }\n];"
+            },
+            "id": "e5f6a7b8-c9d0-4e1f-2a3b-4c5d6e7f8a9b",
+            "name": "Guess List",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                700,
+                600
+            ]
+        },
+        {
+            "parameters": {
+                "operation": "mergeByItem",
+                "resolve": "fieldsOnly",
+                "fieldsToMatch": {
+                    "fields": [
+                        {
+                            "name": "url"
+                        }
+                    ]
+                }
+            },
+            "id": "f6a7b8c9-d0e1-4f2a-3b4c-5d6e7f8a9b0c",
+            "name": "Merge Sitemaps",
+            "type": "n8n-nodes-base.merge",
+            "typeVersion": 3,
+            "position": [
+                900,
+                400
+            ]
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "INSERT INTO wellness.sitemaps (clinic_id, url, depth)\nVALUES ($1, $2, 0)\nON CONFLICT (clinic_id, url) DO NOTHING;",
+                "parameters": "={{ [ $node[\"Webhook\"].json.clinic_id, $json.url ] }}"
+            },
+            "id": "a7b8c9d0-e1f2-4a3b-b4c5-d6e7f8a9b0c1",
+            "name": "UPSERT Sitemaps",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 1,
+            "position": [
+                1100,
+                400
+            ]
+        }
+    ],
+    "connections": {
+        "Webhook": {
+            "main": [
+                [
+                    {
+                        "node": "Get Domains",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Get Domains": {
+            "main": [
+                [
+                    {
+                        "node": "Robots Service Check",
+                        "type": "main",
+                        "index": 0
+                    },
+                    {
+                        "node": "Fetch robots.txt Manually",
+                        "type": "main",
+                        "index": 0
+                    },
+                    {
+                        "node": "Guess List",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Robots Service Check": {
+            "main": [
+                [
+                    {
+                        "node": "Merge Sitemaps",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Fetch robots.txt Manually": {
+            "main": [
+                [
+                    {
+                        "node": "Extract Sitemaps from Robots",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Extract Sitemaps from Robots": {
+            "main": [
+                [
+                    {
+                        "node": "Merge Sitemaps",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Guess List": {
+            "main": [
+                [
+                    {
+                        "node": "Merge Sitemaps",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Merge Sitemaps": {
+            "main": [
+                [
+                    {
+                        "node": "UPSERT Sitemaps",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        }
+    }
+}
