@@ -15,7 +15,7 @@
         {
             "parameters": {
                 "operation": "executeQuery",
-                "query": "SELECT d.id as domain_id, d.domain\nFROM wellness.domains d\nWHERE d.discovery_state = 'pending'\nLIMIT 20;"
+                "query": "SELECT d.id as domain_id, d.domain\nFROM wellness.domains d\nWHERE d.discovery_state = 'pending'\n  AND d.domain IS NOT NULL\n  AND d.domain != ''\n  AND d.domain != 'null'\n  AND d.domain != 'undefined'\n  AND length(d.domain) >= 4\nLIMIT 20;"
             },
             "id": "w3-get-domains",
             "name": "Get Domains",
