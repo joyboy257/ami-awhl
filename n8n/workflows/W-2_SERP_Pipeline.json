@@ -48,53 +48,24 @@
         },
         {
             "parameters": {
-                "method": "GET",
-                "url": "https://serpapi.com/search.json",
-                "authentication": "genericCredentialType",
-                "genericAuthType": "httpQueryAuth",
-                "sendQuery": true,
-                "queryParameters": {
-                    "parameters": [
-                        {
-                            "name": "q",
-                            "value": "={{ $json.query_text }}"
-                        },
-                        {
-                            "name": "engine",
-                            "value": "google"
-                        },
-                        {
-                            "name": "location",
-                            "value": "Singapore"
-                        },
-                        {
-                            "name": "google_domain",
-                            "value": "google.com.sg"
-                        },
-                        {
-                            "name": "gl",
-                            "value": "sg"
-                        },
-                        {
-                            "name": "hl",
-                            "value": "en"
-                        }
-                    ]
-                },
-                "options": {
-                    "timeout": 30000
-                }
+                "engine": "google",
+                "q": "={{ $json.query_text }}",
+                "location": "Singapore",
+                "google_domain": "google.com.sg",
+                "gl": "sg",
+                "hl": "en",
+                "options": {}
             },
-            "id": "w2-serpapi",
-            "name": "SerpAPI Call",
-            "type": "n8n-nodes-base.httpRequest",
-            "typeVersion": 4.2,
+            "id": "w2-serpapi-node",
+            "name": "SerpApi Node",
+            "type": "n8n-nodes-base.serpApi",
+            "typeVersion": 1,
             "position": [
                 700,
                 300
             ],
             "credentials": {
-                "httpQueryAuth": {
+                "serpApi": {
                     "id": "serpapi-creds-id",
                     "name": "SerpAPI Key"
                 }
@@ -123,7 +94,7 @@
         },
         {
             "parameters": {
-                "jsCode": "// Parse SERP results into structured rows\nconst serp = $node['SerpAPI Call'].json;\nconst snapshot_id = $node['Store Snapshot'].json.id;\nconst vertical_id = $node['Split Queries'].json.vertical_id;\nconst results = [];\n\n// Organic results\nif (serp.organic_results) {\n  for (const r of serp.organic_results) {\n    try {\n      const domain = new URL(r.link).hostname.replace('www.', '');\n      results.push({\n        snapshot_id,\n        rank_position: r.position,\n        block_type: 'organic',\n        title: r.title || '',\n        url: r.link,\n        domain,\n        snippet: r.snippet || '',\n        vertical_id\n      });\n    } catch (e) {}\n  }\n}\n\n// Local pack\nif (serp.local_results && serp.local_results.places) {\n  let pos = 1;\n  for (const r of serp.local_results.places) {\n    const domain = r.website ? new URL(r.website).hostname.replace('www.', '') : null;\n    results.push({\n      snapshot_id,\n      rank_position: pos++,\n      block_type: 'local_pack',\n      title: r.title || '',\n      url: r.website || '',\n      domain,\n      snippet: r.address || '',\n      vertical_id\n    });\n  }\n}\n\nreturn results.map(r => ({ json: r }));"
+                "jsCode": "// Parse SERP results into structured rows\nconst serp = $node['SerpApi Node'].json;\nconst snapshot_id = $node['Store Snapshot'].json.id;\nconst vertical_id = $node['Split Queries'].json.vertical_id;\nconst results = [];\n\n// Organic results\nif (serp.organic_results) {\n  for (const r of serp.organic_results) {\n    try {\n      const domain = new URL(r.link).hostname.replace('www.', '');\n      results.push({\n        snapshot_id,\n        rank_position: r.position,\n        block_type: 'organic',\n        title: r.title || '',\n        url: r.link,\n        domain,\n        snippet: r.snippet || '',\n        vertical_id\n      });\n    } catch (e) {}\n  }\n}\n\n// Local pack\nif (serp.local_results && serp.local_results.places) {\n  let pos = 1;\n  for (const r of serp.local_results.places) {\n    const domain = r.website ? new URL(r.website).hostname.replace('www.', '') : null;\n    results.push({\n      snapshot_id,\n      rank_position: pos++,\n      block_type: 'local_pack',\n      title: r.title || '',\n      url: r.website || '',\n      domain,\n      snippet: r.address || '',\n      vertical_id\n    });\n  }\n}\n\nreturn results.map(r => ({ json: r }));"
             },
             "id": "w2-parse-results",
             "name": "Parse Results",
@@ -224,14 +195,14 @@
             "main": [
                 [
                     {
-                        "node": "SerpAPI Call",
+                        "node": "SerpApi Node",
                         "type": "main",
                         "index": 0
                     }
                 ]
             ]
         },
-        "SerpAPI Call": {
+        "SerpApi Node": {
             "main": [
                 [
                     {
