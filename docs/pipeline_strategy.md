@@ -1,323 +1,432 @@
-# AMI Pipeline Strategy (n8n) — v5.1
+# AMI Pipeline Strategy (n8n) — Clean v1.0
 
-## 0. Pipeline Overview
-
-```
-INPUTS → DISCOVERY → KEYWORD → SERP → CRAWL → EXTRACT → SCORING → OUTPUTS
-
-Discovery: W-1 robots → W-2 sitemap expand → pages inventory
-Keyword: K1 templates → K2 SERP expand → K3 tier/prune
-SERP: O-SERP schedule → W-6 snapshot → visibility
-Crawl: O-Daily queue → W-3 Fetch Router (HTTP → Crawl4AI/Firecrawl) → store
-Extract: W-4 meta → W-5 AI (offers/CTAs) → normalize
-Scoring: O-Score weekly → track_level → refresh cadence
-Ops: O-Sweeper + O-Robots + O-Classify
-```
+Verticals in scope (v1):
+- TCM
+- Beauty
+- Chiropractic
+- Aesthetics
 
 ---
 
-## 1. Core Principles
+## 1) Mental Model (The Loop)
 
-| Principle | Implementation |
-| :--- | :--- |
-| **Vertical-First** | `vertical_id` on `clinics` + `keywords`. |
-| **Profile-Bound Keywords** | Unique by `(keyword_text, serp_profile_id)`. |
-| **Fetch Router** | HTTP first → quality gates → Crawl4AI/Firecrawl fallback. |
-| **Clinic-Only Scoring** | Visibility excludes directories (`domain_class`). |
-| **Canonical Hashing** | `content_hash = sha256(markdown ?? cleaned_html ?? raw_html)`. |
+You are running a loop:
 
----
+**Vertical → Search Queries → SERP → Clinics/Domains → Site Inventory → Crawl → SEO + Keywords + Commercial Facts → Score → Monitor → Repeat**
 
-## 2. Schema Patches
+Everything must be:
+- **Bounded** (hard budgets to prevent runaway costs)
+- **Retryable** (job-based execution, resumable)
+- **Observable** (clear run/job status + failure reasons)
+- **Incremental** (reprocess only when content changes)
 
-### 2.0 Prerequisites
-```sql
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
-```
+```mermaid
+graph TD
+    V[Verticals] --> W1[W1 Build Search Queries]
+    W1 --> SQ[(search_queries)]
+    SQ --> W2[W2 SERP Snapshot + Seed]
+    W2 --> SD[(serp_snapshots)]
+    W2 --> SR[(serp_results)]
+    W2 --> CL[(clinics)]
+    W2 --> DM[(domains)]
+    DM --> W3[W3 Site Discovery]
+    W3 --> SM[(sitemaps)]
+    W3 --> PG[(pages)]
+    PG --> W4[W4 Crawl Router]
+    W4 --> PF[(page_fetches)]
+    W4 --> PC[(page_content)]
+    PC --> W5[W5 SEO + Keywords]
+    W5 --> SEO[(page_seo)]
+    W5 --> PK[(page_keywords)]
+    W5 --> CK[(clinic_keywords)]
+    PC --> W6[W6 Commercial Facts]
+    W6 --> OF[(clinic_offers)]
+    W6 --> CTA[(clinic_ctas)]
+    SR --> W7[W7 Scoring]
+    CK --> W7
+    OF --> W7
+    W7 --> SC[(competitor_scores)]
+    SC --> W8[W8 Monitor + Expand]
+    W8 -.-> W2
+    W8 -.-> W4
+2) Minimum Viable Data (Tables)
+Keep tables simple and “source-of-truth-ish”. Extend later.
 
-### 2.1 wellness.jobs
-```sql
-CREATE TABLE wellness.jobs (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  job_type TEXT NOT NULL,
-  target_kind TEXT NOT NULL,
-  target_id UUID,
-  target_url TEXT,
-  input_hash TEXT,
-  prompt_version TEXT,
-  model TEXT,
-  dedupe_key TEXT NOT NULL UNIQUE,
-  state TEXT DEFAULT 'queued',
-  result_json JSONB,
-  priority INT DEFAULT 0,
-  available_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  locked_at TIMESTAMPTZ,
-  lock_expires_at TIMESTAMPTZ,
-  locked_by TEXT,
-  attempts INT DEFAULT 0,
-  max_attempts INT DEFAULT 3,
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  started_at TIMESTAMPTZ,
-  finished_at TIMESTAMPTZ
-);
-CREATE INDEX idx_jobs_claim ON wellness.jobs(job_type, state, available_at);
-```
+Core entities
+verticals — { id, name }
 
-### 2.2 wellness.domains
-```sql
-CREATE TABLE wellness.domains (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  domain TEXT UNIQUE NOT NULL,
-  domain_class TEXT DEFAULT 'unknown',
-  last_request_at TIMESTAMPTZ,
-  cooldown_until TIMESTAMPTZ,
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  updated_at TIMESTAMPTZ DEFAULT NOW()
-);
-```
+geo_sets — SG areas (optional but recommended)
 
-### 2.3 wellness.pages (Alterations)
-```sql
-ALTER TABLE wellness.pages ADD COLUMN IF NOT EXISTS domain_id UUID REFERENCES wellness.domains(id);
-ALTER TABLE wellness.pages ADD COLUMN IF NOT EXISTS sitemap_lastmod TIMESTAMPTZ;
-ALTER TABLE wellness.pages ADD COLUMN IF NOT EXISTS last_crawled_at TIMESTAMPTZ;
-ALTER TABLE wellness.pages ADD COLUMN IF NOT EXISTS last_http_status INT;
-ALTER TABLE wellness.pages ADD COLUMN IF NOT EXISTS last_content_hash TEXT;
-ALTER TABLE wellness.pages ADD COLUMN IF NOT EXISTS page_type TEXT;
-ALTER TABLE wellness.pages ADD COLUMN IF NOT EXISTS type_conf FLOAT DEFAULT 0;
-```
+services — per vertical service taxonomy
 
-### 2.4 wellness.sitemaps (Alterations)
-```sql
-ALTER TABLE wellness.sitemaps ADD COLUMN IF NOT EXISTS depth INT DEFAULT 0;
-ALTER TABLE wellness.sitemaps ADD COLUMN IF NOT EXISTS parent_sitemap_id UUID REFERENCES wellness.sitemaps(id);
-ALTER TABLE wellness.sitemaps ADD COLUMN IF NOT EXISTS locked_at TIMESTAMPTZ;
-ALTER TABLE wellness.sitemaps ADD COLUMN IF NOT EXISTS lock_expires_at TIMESTAMPTZ;
-ALTER TABLE wellness.sitemaps ADD COLUMN IF NOT EXISTS locked_by TEXT;
-ALTER TABLE wellness.sitemaps ADD COLUMN IF NOT EXISTS attempts INT DEFAULT 0;
-ALTER TABLE wellness.sitemaps ADD COLUMN IF NOT EXISTS error_json JSONB;
-```
+search_query_templates — patterns like "best {service} in {geo}", "{service} near me"
 
-### 2.5 wellness.http_fetches
-```sql
-CREATE TABLE wellness.http_fetches (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  page_id UUID REFERENCES wellness.pages(id),
-  url TEXT NOT NULL,
-  domain_id UUID REFERENCES wellness.domains(id),
-  status_code INT,
-  final_url TEXT,
-  headers_json JSONB,
-  duration_ms INT,
-  fetch_provider TEXT DEFAULT 'n8n',
-  provider_cost NUMERIC,
-  quality_gate_failed TEXT,
-  error_json JSONB,
-  fetched_at TIMESTAMPTZ DEFAULT NOW()
-);
-CREATE INDEX idx_fetches_page ON wellness.http_fetches(page_id, fetched_at DESC);
-```
+search_queries — generated queries per vertical (output of W1)
 
-### 2.6 wellness.page_html + wellness.page_content
-```sql
-CREATE TABLE wellness.page_html (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  page_id UUID REFERENCES wellness.pages(id),
-  content_hash TEXT NOT NULL,
-  raw_html TEXT,
-  html_gzip BYTEA,
-  fetched_at TIMESTAMPTZ DEFAULT NOW(),
-  UNIQUE(page_id, content_hash)
-);
+Seeding + SERP
+serp_snapshots — raw SerpAPI JSON per query + timestamp
 
-CREATE TABLE wellness.page_content (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  page_id UUID REFERENCES wellness.pages(id),
-  content_hash TEXT NOT NULL,
-  markdown TEXT,
-  word_count INT,
-  provider TEXT,
-  fetched_at TIMESTAMPTZ DEFAULT NOW(),
-  UNIQUE(page_id, content_hash)
-);
-```
+serp_results — parsed results (rank, type=organic/local_pack, title, url, domain)
 
-### 2.7 wellness.vertical_services
-```sql
-CREATE TABLE wellness.vertical_services (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  vertical_id UUID NOT NULL REFERENCES wellness.verticals(id),
-  service_name TEXT NOT NULL,
-  synonyms TEXT[] DEFAULT '{}',
-  intent TEXT DEFAULT 'commercial',
-  active BOOLEAN DEFAULT TRUE,
-  UNIQUE(vertical_id, service_name)
-);
-```
+clinics — canonical business entity (name, vertical_id, confidence, first_seen_at)
 
-### 2.8 wellness.serp_profiles + geo_sets + keyword_templates
-```sql
-CREATE TABLE wellness.serp_profiles (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  vertical_id UUID NOT NULL REFERENCES wellness.verticals(id),
-  name TEXT NOT NULL,
-  gl TEXT DEFAULT 'sg',
-  hl TEXT DEFAULT 'en',
-  device TEXT DEFAULT 'desktop',
-  location TEXT DEFAULT 'Singapore',
-  uule TEXT,
-  UNIQUE(vertical_id, name)
-);
+domains — domain list + mapping to clinic_id
 
-CREATE TABLE wellness.geo_sets (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  name TEXT UNIQUE NOT NULL,
-  modifiers TEXT[] NOT NULL,
-  priority_order INT DEFAULT 0
-);
+Site inventory + crawl
+sitemaps — discovered sitemap URLs per domain
 
-CREATE TABLE wellness.keyword_templates (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  template TEXT NOT NULL,
-  geo_set_id UUID REFERENCES wellness.geo_sets(id),
-  language TEXT DEFAULT 'en'
-);
+pages — URL inventory (url, domain_id, page_type, last_seen, last_crawled_at, content_hash)
 
-CREATE TABLE wellness.keywords (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  keyword_text TEXT NOT NULL,
-  serp_profile_id UUID NOT NULL REFERENCES wellness.serp_profiles(id),
-  vertical_id UUID NOT NULL REFERENCES wellness.verticals(id),
-  tier TEXT DEFAULT 'C',
-  source TEXT DEFAULT 'manual',
-  seed_keyword_id UUID REFERENCES wellness.keywords(id),
-  active BOOLEAN DEFAULT TRUE,
-  last_snapshot_at TIMESTAMPTZ,
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  UNIQUE(keyword_text, serp_profile_id)
-);
-```
+page_fetches — fetch logs (status_code, fetch_method, bytes, error, fetched_at)
 
-### 2.9 wellness.serp_snapshots + serp_results
-```sql
-CREATE TABLE wellness.serp_snapshots (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  keyword_id UUID NOT NULL REFERENCES wellness.keywords(id),
-  serp_profile_id UUID NOT NULL REFERENCES wellness.serp_profiles(id),
-  raw_json JSONB,
-  raw_hash TEXT,
-  captured_at TIMESTAMPTZ DEFAULT NOW(),
-  UNIQUE(keyword_id, serp_profile_id, captured_at)
-);
+page_content — cleaned markdown + html refs (or blob path)
 
-CREATE TABLE wellness.serp_results (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  snapshot_id UUID NOT NULL REFERENCES wellness.serp_snapshots(id),
-  rank_position INT NOT NULL,
-  block_type TEXT NOT NULL,  -- organic, local_pack, featured, ad
-  domain_id UUID REFERENCES wellness.domains(id),
-  url TEXT,
-  title TEXT,
-  snippet TEXT,
-  UNIQUE(snapshot_id, rank_position, block_type)
-);
-```
+Enrichment outputs
+page_seo — title/meta/H1/canonical/schema/hreflang/etc.
 
----
+page_keywords — extracted keywords per page (term, score, method)
 
-## 3. Robots Compliance
+clinic_keywords — rolled up keywords per clinic/domain
 
-### 3.1 Microservice Response
-```json
-{"allowed": true, "reason": "allow_rule:/", "matched_rule": "/", "user_agent": "AMI-Bot", "crawl_delay": 5}
-```
+clinic_offers — prices/packages/trials evidence-based
 
-### 3.2 Storage
-Decisions stored in `jobs.result_json` when skipping:
-```json
-{"skip_reason": "robots", "robots_decision": {"allowed": false, "reason": "disallow_rule:/private/"}}
-```
+clinic_ctas — whatsapp/book/phone etc evidence-based
 
----
+Ops (required for “smooth runs”)
+runs — run_id, started/ended, mode, budgets, status
 
-## 4. W-3 Fetch Router
+jobs — queue table (job_type, payload, state, attempts, available_at, locked_at)
 
-### 4.1 Decision Flow
-```
-1. Claim job → 2. Resolve domain_id → 3. Check robots
-4. Atomic throttle → 5. HTTP fetch → 6. Quality gates
-7. If gates fail → Fallback provider → 8. Store + hash
-9. If hash changed → enqueue extract_meta
-```
+You cannot have “smooth trigger” without runs + jobs even if everything else is perfect.
 
-### 4.2 Quality Gates
-| Gate | Check | Action |
-| :--- | :--- | :--- |
-| Status | 403, 429, 503 | → Fallback |
-| Size | <2KB | → Fallback |
-| SPA Shell | `#root`/`#__next` + <200 words | → Fallback |
-| Text Ratio | visible_text/html < 0.05 | → Fallback |
-| Bot Block | "cf-browser-verification" | → Fallback |
+3) Workflow Map (W1 → W8)
+Workflow 1 — Build Search Queries (per vertical)
+Goal: generate the search queries to discover clinics + keyword universe.
+Trigger: manual (“Run for verticals”), or weekly schedule.
 
-### 4.3 Canonical Hashing
-```
-content_hash = sha256(markdown ?? cleaned_html ?? raw_html)
-```
-Applied **after** provider returns, ensuring identical content → identical hash regardless of provider.
+Inputs
 
-### 4.4 Provider Failover
-```
-HTTP 403/429 → try Crawl4AI (self-host)
-Crawl4AI 429/5xx → try Firecrawl
-Firecrawl 429/5xx → reschedule (available_at + 1 hour)
-```
+verticals = {TCM, Beauty, Chiropractic, Aesthetics}
 
-### 4.5 Provider Contracts
+services per vertical (start with 10–30 each)
 
-**Firecrawl:**
-```
-POST https://api.firecrawl.dev/v1/scrape
-Headers: Authorization: Bearer $FIRECRAWL_API_KEY
-Body: {"url": "...", "formats": ["markdown", "html"], "timeout": 30000}
-Response: {"success": true, "data": {"markdown": "...", "html": "..."}}
-```
+geo terms (optional): Central, East, West, North, CBD, neighborhoods, “near me”
 
-**Crawl4AI (self-host):**
-```
-POST http://crawl4ai:8000/crawl
-Body: {"url": "...", "word_count_threshold": 50}
-Response: {"success": true, "markdown": "...", "cleaned_html": "..."}
-```
+query templates: 10–20 patterns
 
----
+Process
 
-## 5. Workflow Inventory
+Cartesian product but bounded:
 
-| ID | Type | Purpose |
-| :--- | :--- | :--- |
-| **O-Daily** | Orchestrator | Enqueue crawl by track_level |
-| **O-SERP** | Orchestrator | Enqueue SERP by tier |
-| **O-Score** | Orchestrator | Weekly scoring |
-| **W-1** | Discovery | Robots + sitemaps |
-| **W-2** | Discovery | Sitemap expansion |
-| **W-3** | Job Worker | Fetch Router |
-| **W-4** | Job Worker | Extract metadata |
-| **W-5** | Job Worker | Extract AI |
-| **W-6** | Job Worker | SERP snapshot |
-| **W-K1** | Keyword | Generate templates |
-| **W-K2** | Keyword | Expand SERP |
-| **W-K3** | Keyword | Tier + prune |
-| **O-Sweeper** | Ops | Reclaim stuck |
-| **O-Robots** | Ops | Refresh robots |
-| **O-Classify** | Ops | Classify domains |
+max_queries_per_vertical_per_run (default 200)
 
----
+enforce uniqueness via hash(vertical_id + query_text + geo)
 
-## 6. Acceptance Criteria
+Two layers:
 
-- [ ] `CREATE EXTENSION pgcrypto` in migration 001.
-- [ ] All DDLs exist: jobs, domains, http_fetches, page_html, page_content, vertical_services, serp_snapshots, serp_results.
-- [ ] Canonical hashing uses `markdown ?? cleaned_html ?? raw_html`.
-- [ ] Provider failover: HTTP → Crawl4AI → Firecrawl → reschedule.
-- [ ] Keywords unique by `(keyword_text, serp_profile_id)`.
-- [ ] serp_results unique by `(snapshot_id, rank_position, block_type)`.
+Service queries: “acupuncture near me”, “chiropractor tampines”
+
+Intent queries: price, trial, package, promo, review, best
+
+Output
+Insert into search_queries:
+
+vertical_id, query_text, geo, intent_tag, priority_tier (A/B/C), active=true
+
+Workflow 2 — Seed Clinics + Keywords (SERP-driven + optional manual)
+Goal: discover clinics/domains from SERP and seed your keyword universe.
+Trigger: after W1, or “Run full seed”.
+
+Inputs
+
+search_queries where active=true and priority_tier in (A, B)
+
+2A) SERP snapshot
+
+Call SerpAPI for each query (bounded)
+
+Store raw JSON in serp_snapshots
+
+Parse:
+
+organic results (url, title, snippet)
+
+local pack / map pack (if available)
+
+Upsert serp_results
+
+2B) Convert SERP results into clinic/domain seeds
+
+Extract domain from each result URL
+
+Heuristics:
+
+exclude directories/aggregators (config denylist)
+
+prefer URLs with patterns like /contact, /services, /treatment, /pricing
+
+Upsert:
+
+domains
+
+clinics (best-effort name from SERP; mark low confidence if uncertain)
+
+map domain → clinic (if unsure, keep clinic unresolved but domain retained)
+
+2C) Seed keywords (initial)
+3 keyword sources:
+
+your query_texts (highest intent)
+
+SERP “related searches / people also ask” (expand)
+
+SERP snippets/title n-grams (lightweight)
+
+Store in clinic_keywords (or dedicated keywords table) with:
+
+vertical_id, term, source={query|related|snippet}, initial_score
+
+Outputs
+
+domains/clinics ready to crawl
+
+initial keywords aligned to vertical
+
+Workflow 3 — Site Discovery (build URL inventory per domain)
+Goal: turn each seeded domain into a page inventory.
+Trigger: after W2, or daily for new domains.
+
+Inputs
+
+domains where discovery_state != complete
+
+Process
+
+Fetch robots.txt
+
+Extract sitemap URLs
+
+Guess common sitemap endpoints regardless (bounded)
+
+Fetch/parse sitemap XML:
+
+recurse to depth 3
+
+extract page URLs (+ lastmod if present)
+
+Outputs
+
+sitemaps filled
+
+pages populated with candidate URLs
+
+mark domain discovery complete + counts
+
+Discovery does not crawl deeply; it only builds inventory.
+
+Workflow 4 — Crawl Router (fetch + clean content)
+Goal: fetch pages reliably and store stable content hashes.
+Trigger: scheduled (hourly) + manual “crawl now”.
+
+Inputs
+
+pages due for crawl:
+
+last_crawled_at is null OR older than track_level interval
+
+not excluded by rules (robots, duplicates, denylist)
+
+Process
+
+Enforce per-domain throttle (critical)
+
+Try in order:
+
+HTTP GET
+
+if thin/blocked → headless (Crawl4AI)
+
+if still blocked → Firecrawl
+
+Save:
+
+fetch metadata in page_fetches
+
+HTML (or pointer to storage)
+
+cleaned markdown in page_content
+
+content_hash = sha256(markdown) on pages
+
+Outputs
+
+content DB filled with stable hashes (enables incremental processing)
+
+Workflow 5 — SEO Enrichment (on changed pages)
+Goal: enrich SEO fields + derive keywords from content.
+Trigger: whenever content_hash changes (or after crawl batch).
+
+Inputs
+
+pages where content_hash != last_processed_hash
+
+5A) SEO metadata extraction (deterministic)
+Extract from HTML:
+
+title, meta description
+
+H1/H2s
+
+canonical
+
+robots meta
+
+OG tags
+
+schema.org JSON-LD presence + types
+
+hreflang (if any)
+
+internal links count, external links count
+
+image alt coverage (optional)
+
+Store in page_seo.
+
+5B) Keyword extraction (2-pass)
+
+Pass 1 (cheap): tf-idf / n-grams / RAKE-like from markdown
+
+Pass 2 (AI only for priority pages): “extract service + geo + intent keywords”
+
+Store in page_keywords.
+
+5C) Roll up to clinic/domain level
+Aggregate top terms across all pages per domain (weight service pages > blog).
+Store in clinic_keywords.
+
+Outputs
+
+SEO data + keywords ready
+
+Workflow 6 — Commercial Facts (offers, prices, promos, CTAs)
+Goal: produce battlecard-ready facts with evidence.
+Trigger: after W5, only for likely commercial pages.
+
+Inputs
+
+pages where page_type in (service, commercial, contact)
+OR content contains pricing signals
+
+Process
+AI extraction with evidence rule:
+
+Offer type (trial/package)
+
+Price + currency
+
+Service
+
+CTA type (WhatsApp/Book/Call)
+
+Evidence snippet = exact text match
+
+Store in clinic_offers, clinic_ctas with URL/page reference.
+
+Outputs
+
+evidence-backed commercial intel
+
+Workflow 7 — Competitor Scoring (visibility + site strength)
+Goal: convert signals into rankings.
+
+Inputs
+
+serp_results (rankings)
+
+clinic_offers presence
+
+site inventory completeness
+
+SEO hygiene signals (schema, canonical, etc.)
+
+Outputs
+
+clinics.competitor_score
+
+per-vertical leaderboards
+
+Workflow 8 — Monitoring + Expansion Loop
+Goal: keep data fresh + discover new competitors.
+
+Cadence:
+
+Daily: Tier A SERPs
+
+Weekly: Tier B SERPs
+
+Monthly: refresh discovery for domains
+
+Continuous: crawl due pages
+
+Continuous: enrich changed pages
+
+Expansion:
+
+auto-add new domains from SERPs into discovery queue
+
+4) One-Click Trigger (O-Run Orchestrator)
+Instead of manually triggering 8 workflows, make one orchestrator.
+
+Input: vertical(s), mode (smoke/full), budgets
+Action: creates run_id, then enqueues jobs in order:
+
+build_queries (W1)
+
+serp_snapshot (W2A)
+
+seed_clinics_keywords (W2B/W2C)
+
+domain_discovery (W3)
+
+crawl_pages (W4)
+
+seo_enrich_keywords (W5)
+
+commercial_extract (W6)
+
+score (W7)
+
+Success condition: queue drained + asserts pass.
+
+This is the mechanism that makes “Trigger Workflow = smooth run” true.
+
+5) Practical Defaults (Caps)
+max search queries per vertical per run: 200
+
+max SERP calls per run: 100–300
+
+max new domains seeded per run: 50
+
+max pages per domain to crawl initially: 50
+
+prioritize /services, /treatments, /contact, /pricing
+
+per-domain concurrency: 1
+
+retry policy: 3 attempts, exponential backoff, then mark “needs review”
+
+6) Sanity Checks (Expected DB State After Each Workflow)
+After W1: search_queries has rows for all 4 verticals ✅
+
+After W2: serp_snapshots, serp_results, domains, clinics populated ✅
+
+After W3: pages count jumps per domain ✅
+
+After W4: page_content filled, content_hash present, fetch logs show success rates ✅
+
+After W5: page_seo, page_keywords, clinic_keywords populated ✅
+
+After W6: offers + CTAs show up with evidence ✅
+
+After W7: competitor score tables filled ✅
