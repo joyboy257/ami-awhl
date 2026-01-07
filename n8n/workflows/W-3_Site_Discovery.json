@@ -15,7 +15,7 @@
         {
             "parameters": {
                 "operation": "executeQuery",
-                "query": "-- Get domains pending discovery\nSELECT d.id as domain_id, d.domain\nFROM wellness.domains d\nWHERE d.discovery_state = 'pending'\nLIMIT 20;"
+                "query": "SELECT d.id as domain_id, d.domain\nFROM wellness.domains d\nWHERE d.discovery_state = 'pending'\nLIMIT 20;"
             },
             "id": "w3-get-domains",
             "name": "Get Domains",
@@ -69,10 +69,10 @@
         {
             "parameters": {
                 "method": "POST",
-                "url": "http://localhost:8000/check",
+                "url": "http://ami-robots-parser:8000/check",
                 "sendBody": true,
                 "specifyBody": "json",
-                "jsonBody": "={{ JSON.stringify({ url: 'https://' + $json.domain, robots_txt_url: 'https://' + $json.domain + '/robots.txt', user_agent: 'AMI-Bot' }) }}",
+                "jsonBody": "={{ JSON.stringify({ url: 'https://' + $node['Split Domains'].json.domain, robots_txt_url: 'https://' + $node['Split Domains'].json.domain + '/robots.txt', user_agent: 'AMI-Bot' }) }}",
                 "options": {
                     "timeout": 15000
                 }
@@ -89,7 +89,7 @@
         },
         {
             "parameters": {
-                "jsCode": "// Generate sitemap candidate URLs\nconst domain = $node['Split Domains'].json.domain;\nconst domain_id = $node['Split Domains'].json.domain_id;\nreturn [\n  { json: { domain_id, url: `https://${domain}/sitemap.xml`, depth: 1 } },\n  { json: { domain_id, url: `https://${domain}/sitemap_index.xml`, depth: 1 } },\n  { json: { domain_id, url: `https://${domain}/wp-sitemap.xml`, depth: 1 } },\n  { json: { domain_id, url: `https://${domain}/page-sitemap.xml`, depth: 1 } }\n];"
+                "jsCode": "// Generate sitemap candidate URLs\nconst domain = $node['Split Domains'].json.domain;\nconst domain_id = $node['Split Domains'].json.domain_id;\nreturn [\n  { json: { domain_id, domain, url: `https://${domain}/sitemap.xml`, depth: 1 } },\n  { json: { domain_id, domain, url: `https://${domain}/sitemap_index.xml`, depth: 1 } },\n  { json: { domain_id, domain, url: `https://${domain}/wp-sitemap.xml`, depth: 1 } },\n  { json: { domain_id, domain, url: `https://${domain}/page-sitemap.xml`, depth: 1 } }\n];"
             },
             "id": "w3-sitemap-candidates",
             "name": "Sitemap Candidates",
@@ -119,15 +119,28 @@
         },
         {
             "parameters": {
+                "jsCode": "// Merge fetch result with sitemap candidate data for downstream use\nconst candidate = $node['Sitemap Candidates'].json;\nconst fetchResult = $input.item.json;\n\n// Extract XML content from various possible locations\nlet xml = '';\nif (typeof fetchResult === 'string') {\n  xml = fetchResult;\n} else if (fetchResult.data) {\n  xml = fetchResult.data;\n} else if (fetchResult.body) {\n  xml = fetchResult.body;\n}\n\nreturn [{ json: {\n  domain_id: candidate.domain_id,\n  domain: candidate.domain,\n  url: candidate.url,\n  depth: candidate.depth,\n  _xml: xml\n}}];"
+            },
+            "id": "w3-merge-fetch",
+            "name": "Merge Fetch Result",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1500,
+                300
+            ]
+        },
+        {
+            "parameters": {
                 "operation": "executeQuery",
-                "query": "INSERT INTO wellness.sitemaps (domain_id, url, depth)\nVALUES ('{{ $node[\"Sitemap Candidates\"].json.domain_id }}'::uuid, '{{ $node[\"Sitemap Candidates\"].json.url }}', {{ $node[\"Sitemap Candidates\"].json.depth }})\nON CONFLICT (domain_id, url) DO UPDATE SET last_fetched_at = NOW()\nRETURNING id;"
+                "query": "INSERT INTO wellness.sitemaps (domain_id, url, depth)\nVALUES ('{{ $json.domain_id }}'::uuid, '{{ $json.url }}', {{ $json.depth }})\nON CONFLICT (domain_id, url) DO UPDATE SET last_fetched_at = NOW()\nRETURNING id;"
             },
             "id": "w3-upsert-sitemap",
             "name": "Upsert Sitemap",
             "type": "n8n-nodes-base.postgres",
             "typeVersion": 2.6,
             "position": [
-                1500,
+                1700,
                 300
             ],
             "credentials": {
@@ -139,14 +152,34 @@
         },
         {
             "parameters": {
-                "jsCode": "// Parse sitemap XML and extract URLs\n// Get XML from Fetch Sitemap, not from Upsert Sitemap (which only has ID)\nconst fetchResult = $node['Fetch Sitemap'].json;\nconst xml = fetchResult.data || fetchResult.body || (typeof fetchResult === 'string' ? fetchResult : '');\nconst domain_id = $node['Sitemap Candidates'].json.domain_id;\nconst urls = [];\n\nif (!xml || typeof xml !== 'string') {\n  // No valid XML, return empty\n  return [];\n}\n\n// Simple regex extraction for <loc> tags\nconst locMatches = xml.match(/<loc>([^<]+)<\\/loc>/g) || [];\nfor (const match of locMatches) {\n  const url = match.replace('<loc>', '').replace('</loc>', '').trim();\n  if (url && url.startsWith('http')) {\n    urls.push({ domain_id, url });\n  }\n}\n\nif (urls.length === 0) {\n  return [];\n}\n\nreturn urls.slice(0, 100).map(u => ({ json: u }));"
+                "jsCode": "// Parse sitemap XML and extract URLs\n// Get XML from Merge Fetch Result node - BEFORE the DB insert\nconst mergedData = $node['Merge Fetch Result'].json;\nconst xml = mergedData._xml || '';\nconst domain_id = mergedData.domain_id;\nconst urls = [];\n\nif (!xml || typeof xml !== 'string' || xml.length < 50) {\n  // No valid XML, skip this sitemap\n  return [];\n}\n\n// Simple regex extraction for <loc> tags\nconst locMatches = xml.match(/<loc>([^<]+)<\\/loc>/g) || [];\nfor (const match of locMatches) {\n  const url = match.replace('<loc>', '').replace('</loc>', '').trim();\n  if (url && url.startsWith('http')) {\n    urls.push({ domain_id, url });\n  }\n}\n\nif (urls.length === 0) {\n  return [];\n}\n\nreturn urls.slice(0, 100).map(u => ({ json: u }));"
             },
             "id": "w3-parse-sitemap",
             "name": "Parse Sitemap",
             "type": "n8n-nodes-base.code",
             "typeVersion": 2,
             "position": [
-                1700,
+                1900,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "conditions": {
+                    "boolean": [
+                        {
+                            "value1": "={{ $json.domain_id && $json.url }}",
+                            "value2": true
+                        }
+                    ]
+                }
+            },
+            "id": "w3-filter-valid",
+            "name": "Filter Valid Pages",
+            "type": "n8n-nodes-base.if",
+            "typeVersion": 2,
+            "position": [
+                2100,
                 300
             ]
         },
@@ -160,15 +193,16 @@
             "type": "n8n-nodes-base.postgres",
             "typeVersion": 2.6,
             "position": [
-                1900,
-                300
+                2300,
+                250
             ],
             "credentials": {
                 "postgres": {
                     "id": "postgres-creds-id",
                     "name": "Postgres account"
                 }
-            }
+            },
+            "continueOnFail": true
         },
         {
             "parameters": {
@@ -180,7 +214,7 @@
             "type": "n8n-nodes-base.postgres",
             "typeVersion": 2.6,
             "position": [
-                2100,
+                2500,
                 300
             ],
             "credentials": {
@@ -262,6 +296,17 @@
             "main": [
                 [
                     {
+                        "node": "Merge Fetch Result",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Merge Fetch Result": {
+            "main": [
+                [
+                    {
                         "node": "Upsert Sitemap",
                         "type": "main",
                         "index": 0
@@ -284,7 +329,25 @@
             "main": [
                 [
                     {
+                        "node": "Filter Valid Pages",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Filter Valid Pages": {
+            "main": [
+                [
+                    {
                         "node": "Upsert Pages",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                [
+                    {
+                        "node": "Complete Domain",
                         "type": "main",
                         "index": 0
                     }
