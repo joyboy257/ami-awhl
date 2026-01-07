@@ -3,7 +3,7 @@
     "nodes": [
         {
             "parameters": {},
-            "id": "w3-trigger-1",
+            "id": "w3-trigger",
             "name": "Manual Trigger",
             "type": "n8n-nodes-base.manualTrigger",
             "typeVersion": 1,
@@ -15,7 +15,7 @@
         {
             "parameters": {
                 "operation": "executeQuery",
-                "query": "SELECT d.id as domain_id, d.domain\nFROM wellness.domains d\nWHERE d.discovery_state = 'pending'\n  AND d.domain IS NOT NULL\n  AND d.domain != ''\n  AND d.domain != 'null'\n  AND d.domain != 'undefined'\n  AND length(d.domain) >= 4\nLIMIT 20;"
+                "query": "SELECT d.id as domain_id, d.domain\nFROM wellness.domains d\nWHERE d.discovery_state = 'pending'\n  AND d.domain IS NOT NULL AND d.domain != '' AND length(d.domain) >= 4\nLIMIT 20;"
             },
             "id": "w3-get-domains",
             "name": "Get Domains",
@@ -48,6 +48,19 @@
         },
         {
             "parameters": {
+                "jsCode": "// Prepare domain context and build sitemap URL\n// Process one sitemap URL per domain (simplest approach)\nconst d = $input.item.json;\nconst domain = d.domain;\nconst domain_id = d.domain_id;\nconst sitemapUrl = 'https://' + domain + '/sitemap.xml';\n\nreturn [{ json: { domain_id, domain, sitemap_url: sitemapUrl } }];"
+            },
+            "id": "w3-prep-domain",
+            "name": "Prep Domain",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                650,
+                300
+            ]
+        },
+        {
+            "parameters": {
                 "operation": "executeQuery",
                 "query": "UPDATE wellness.domains SET discovery_state = 'in_progress' WHERE id = '{{ $json.domain_id }}'::uuid;"
             },
@@ -56,7 +69,7 @@
             "type": "n8n-nodes-base.postgres",
             "typeVersion": 2.6,
             "position": [
-                700,
+                850,
                 300
             ],
             "credentials": {
@@ -68,41 +81,20 @@
         },
         {
             "parameters": {
-                "method": "POST",
-                "url": "http://ami-robots-parser:8000/check",
-                "sendBody": true,
-                "specifyBody": "json",
-                "jsonBody": "={{ JSON.stringify({ url: 'https://' + $node['Split Domains'].json.domain, robots_txt_url: 'https://' + $node['Split Domains'].json.domain + '/robots.txt', user_agent: 'AMI-Bot' }) }}",
-                "options": {
-                    "timeout": 15000
-                }
+                "jsCode": "// Pass domain context through (Lock Domain returns nothing useful)\nconst prev = $input.item.json;\nreturn [{ json: { domain_id: prev.domain_id, domain: prev.domain, sitemap_url: prev.sitemap_url } }];"
             },
-            "id": "w3-check-robots",
-            "name": "Check Robots",
-            "type": "n8n-nodes-base.httpRequest",
-            "typeVersion": 4.2,
-            "position": [
-                900,
-                300
-            ],
-            "continueOnFail": true
-        },
-        {
-            "parameters": {
-                "jsCode": "// Generate sitemap candidate URLs\nconst domain = $node['Split Domains'].json.domain;\nconst domain_id = $node['Split Domains'].json.domain_id;\nreturn [\n  { json: { domain_id, domain, url: `https://${domain}/sitemap.xml`, depth: 1 } },\n  { json: { domain_id, domain, url: `https://${domain}/sitemap_index.xml`, depth: 1 } },\n  { json: { domain_id, domain, url: `https://${domain}/wp-sitemap.xml`, depth: 1 } },\n  { json: { domain_id, domain, url: `https://${domain}/page-sitemap.xml`, depth: 1 } }\n];"
-            },
-            "id": "w3-sitemap-candidates",
-            "name": "Sitemap Candidates",
+            "id": "w3-restore-context-1",
+            "name": "Restore Context",
             "type": "n8n-nodes-base.code",
             "typeVersion": 2,
             "position": [
-                1100,
+                1000,
                 300
             ]
         },
         {
             "parameters": {
-                "url": "={{ $json.url }}",
+                "url": "={{ $json.sitemap_url }}",
                 "options": {
                     "timeout": 20000
                 }
@@ -112,54 +104,21 @@
             "type": "n8n-nodes-base.httpRequest",
             "typeVersion": 4.2,
             "position": [
-                1300,
+                1200,
                 300
             ],
             "continueOnFail": true
         },
         {
             "parameters": {
-                "jsCode": "// Merge fetch result with sitemap candidate data for downstream use\nconst candidate = $node['Sitemap Candidates'].json;\nconst fetchResult = $input.item.json;\n\n// Extract XML content from various possible locations\nlet xml = '';\nif (typeof fetchResult === 'string') {\n  xml = fetchResult;\n} else if (fetchResult.data) {\n  xml = fetchResult.data;\n} else if (fetchResult.body) {\n  xml = fetchResult.body;\n}\n\nreturn [{ json: {\n  domain_id: candidate.domain_id,\n  domain: candidate.domain,\n  url: candidate.url,\n  depth: candidate.depth,\n  _xml: xml\n}}];"
+                "jsCode": "// Extract XML and parse URLs - ALL IN ONE NODE\nconst resp = $input.item.json;\n\n// Get domain context from upstream - we need to handle where it might come from\n// Since HTTP replaces data, we need to reconstruct from context\nconst allItems = $input.all();\nconst prevContext = allItems.length > 1 ? allItems[0].json : {};\n\n// For single item flow, prev context is lost - we'll get it from the current execution\n// The workaround: restore context node output was consumed by HTTP request\n// Solution: We'll extract domain from the sitemap URL\nlet sitemapUrl = '';\nlet domain = '';\nlet domain_id = resp.domain_id;\n\nif (resp.sitemap_url) {\n  sitemapUrl = resp.sitemap_url;\n} else if (resp.url) {\n  sitemapUrl = resp.url;\n}\n\n// Try to get domain from URL\nif (sitemapUrl) {\n  try {\n    domain = new URL(sitemapUrl).hostname;\n  } catch(e) {}\n}\n\n// Extract XML content\nlet xml = '';\nif (typeof resp === 'string') {\n  xml = resp;\n} else if (resp.data) {\n  xml = resp.data;\n} else if (resp.body) {\n  xml = resp.body;\n}\n\n// Parse sitemap\nconst urls = [];\nif (xml && typeof xml === 'string' && xml.length > 50) {\n  const locMatches = xml.match(/<loc>([^<]+)<\\/loc>/g) || [];\n  for (const match of locMatches) {\n    const url = match.replace('<loc>', '').replace('</loc>', '').trim();\n    if (url && url.startsWith('http')) {\n      // Extract domain from page URL if we don't have it\n      let pageDomain = domain;\n      if (!pageDomain) {\n        try { pageDomain = new URL(url).hostname; } catch(e) {}\n      }\n      urls.push({ url, domain: pageDomain });\n    }\n  }\n}\n\nif (urls.length === 0) {\n  // No URLs found - mark as skip but we still need to complete\n  return [{ json: { _skip: true, domain, _reason: 'no_urls' } }];\n}\n\n// Return first 50 URLs with domain\nreturn urls.slice(0, 50).map(u => ({ json: u }));"
             },
-            "id": "w3-merge-fetch",
-            "name": "Merge Fetch Result",
+            "id": "w3-parse-all",
+            "name": "Parse and Extract",
             "type": "n8n-nodes-base.code",
             "typeVersion": 2,
             "position": [
-                1500,
-                300
-            ]
-        },
-        {
-            "parameters": {
-                "operation": "executeQuery",
-                "query": "INSERT INTO wellness.sitemaps (domain_id, url, depth)\nVALUES ('{{ $json.domain_id }}'::uuid, '{{ $json.url }}', {{ $json.depth }})\nON CONFLICT (domain_id, url) DO UPDATE SET last_fetched_at = NOW()\nRETURNING id;"
-            },
-            "id": "w3-upsert-sitemap",
-            "name": "Upsert Sitemap",
-            "type": "n8n-nodes-base.postgres",
-            "typeVersion": 2.6,
-            "position": [
-                1700,
-                300
-            ],
-            "credentials": {
-                "postgres": {
-                    "id": "postgres-creds-id",
-                    "name": "Postgres account"
-                }
-            }
-        },
-        {
-            "parameters": {
-                "jsCode": "// Parse sitemap XML and extract URLs\n// Get XML from Merge Fetch Result node - BEFORE the DB insert\nconst mergedData = $node['Merge Fetch Result'].json;\nconst xml = mergedData._xml || '';\nconst domain_id = mergedData.domain_id;\nconst urls = [];\n\nif (!xml || typeof xml !== 'string' || xml.length < 50) {\n  // No valid XML, skip this sitemap\n  return [];\n}\n\n// Simple regex extraction for <loc> tags\nconst locMatches = xml.match(/<loc>([^<]+)<\\/loc>/g) || [];\nfor (const match of locMatches) {\n  const url = match.replace('<loc>', '').replace('</loc>', '').trim();\n  if (url && url.startsWith('http')) {\n    urls.push({ domain_id, url });\n  }\n}\n\nif (urls.length === 0) {\n  return [];\n}\n\nreturn urls.slice(0, 100).map(u => ({ json: u }));"
-            },
-            "id": "w3-parse-sitemap",
-            "name": "Parse Sitemap",
-            "type": "n8n-nodes-base.code",
-            "typeVersion": 2,
-            "position": [
-                1900,
+                1400,
                 300
             ]
         },
@@ -168,32 +127,45 @@
                 "conditions": {
                     "boolean": [
                         {
-                            "value1": "={{ $json.domain_id && $json.url }}",
+                            "value1": "={{ $json._skip !== true && $json.url && $json.domain }}",
                             "value2": true
                         }
                     ]
                 }
             },
-            "id": "w3-filter-valid",
-            "name": "Filter Valid Pages",
+            "id": "w3-filter",
+            "name": "Filter Valid",
             "type": "n8n-nodes-base.if",
             "typeVersion": 2,
             "position": [
-                2100,
+                1600,
                 300
             ]
         },
         {
             "parameters": {
+                "jsCode": "// Lookup domain_id from domain name\nconst item = $input.item.json;\nreturn [{ json: { url: item.url, domain: item.domain } }];"
+            },
+            "id": "w3-prep-insert",
+            "name": "Prep Insert",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1750,
+                250
+            ]
+        },
+        {
+            "parameters": {
                 "operation": "executeQuery",
-                "query": "INSERT INTO wellness.pages (domain_id, url)\nVALUES ('{{ $json.domain_id }}'::uuid, '{{ $json.url }}')\nON CONFLICT (domain_id, url) DO UPDATE SET last_seen_at = NOW()\nRETURNING id;"
+                "query": "INSERT INTO wellness.pages (domain_id, url)\nSELECT d.id, '{{ $json.url }}'\nFROM wellness.domains d\nWHERE d.domain = '{{ $json.domain }}'\nON CONFLICT (domain_id, url) DO UPDATE SET last_seen_at = NOW();"
             },
             "id": "w3-upsert-pages",
             "name": "Upsert Pages",
             "type": "n8n-nodes-base.postgres",
             "typeVersion": 2.6,
             "position": [
-                2300,
+                1900,
                 250
             ],
             "credentials": {
@@ -206,15 +178,28 @@
         },
         {
             "parameters": {
-                "operation": "executeQuery",
-                "query": "UPDATE wellness.domains SET discovery_state = 'complete' WHERE id = '{{ $node[\"Split Domains\"].json.domain_id }}'::uuid;"
+                "jsCode": "// Get domain for completion\nconst item = $input.item.json;\nconst domain = item.domain || '';\nreturn [{ json: { domain } }];"
             },
-            "id": "w3-complete-domain",
+            "id": "w3-prep-complete",
+            "name": "Prep Complete",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                2050,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "UPDATE wellness.domains SET discovery_state = 'complete' WHERE domain = '{{ $json.domain }}';"
+            },
+            "id": "w3-complete",
             "name": "Complete Domain",
             "type": "n8n-nodes-base.postgres",
             "typeVersion": 2.6,
             "position": [
-                2500,
+                2200,
                 300
             ],
             "credentials": {
@@ -252,6 +237,17 @@
             "main": [
                 [
                     {
+                        "node": "Prep Domain",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Prep Domain": {
+            "main": [
+                [
+                    {
                         "node": "Lock Domain",
                         "type": "main",
                         "index": 0
@@ -263,25 +259,14 @@
             "main": [
                 [
                     {
-                        "node": "Check Robots",
+                        "node": "Restore Context",
                         "type": "main",
                         "index": 0
                     }
                 ]
             ]
         },
-        "Check Robots": {
-            "main": [
-                [
-                    {
-                        "node": "Sitemap Candidates",
-                        "type": "main",
-                        "index": 0
-                    }
-                ]
-            ]
-        },
-        "Sitemap Candidates": {
+        "Restore Context": {
             "main": [
                 [
                     {
@@ -296,47 +281,43 @@
             "main": [
                 [
                     {
-                        "node": "Merge Fetch Result",
+                        "node": "Parse and Extract",
                         "type": "main",
                         "index": 0
                     }
                 ]
             ]
         },
-        "Merge Fetch Result": {
+        "Parse and Extract": {
             "main": [
                 [
                     {
-                        "node": "Upsert Sitemap",
+                        "node": "Filter Valid",
                         "type": "main",
                         "index": 0
                     }
                 ]
             ]
         },
-        "Upsert Sitemap": {
+        "Filter Valid": {
             "main": [
                 [
                     {
-                        "node": "Parse Sitemap",
+                        "node": "Prep Insert",
                         "type": "main",
                         "index": 0
                     }
-                ]
-            ]
-        },
-        "Parse Sitemap": {
-            "main": [
+                ],
                 [
                     {
-                        "node": "Filter Valid Pages",
+                        "node": "Prep Complete",
                         "type": "main",
                         "index": 0
                     }
                 ]
             ]
         },
-        "Filter Valid Pages": {
+        "Prep Insert": {
             "main": [
                 [
                     {
@@ -344,17 +325,21 @@
                         "type": "main",
                         "index": 0
                     }
-                ],
+                ]
+            ]
+        },
+        "Upsert Pages": {
+            "main": [
                 [
                     {
-                        "node": "Complete Domain",
+                        "node": "Prep Complete",
                         "type": "main",
                         "index": 0
                     }
                 ]
             ]
         },
-        "Upsert Pages": {
+        "Prep Complete": {
             "main": [
                 [
                     {

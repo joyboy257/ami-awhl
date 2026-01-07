@@ -48,6 +48,19 @@
         },
         {
             "parameters": {
+                "jsCode": "// Build search query and STORE query context for later use\nconst q = $input.item.json;\nconst searchQuery = (q.query_text || '') + (q.geo ? ' ' + q.geo : '') + ' singapore';\nreturn [{ json: {\n  _query_id: q.query_id,\n  _vertical_id: q.vertical_id,\n  _search_query: searchQuery.trim()\n}}];"
+            },
+            "id": "w2-build-query",
+            "name": "Build Query",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                650,
+                300
+            ]
+        },
+        {
+            "parameters": {
                 "method": "POST",
                 "url": "https://google.serper.dev/search",
                 "sendHeaders": true,
@@ -65,7 +78,7 @@
                 },
                 "sendBody": true,
                 "specifyBody": "json",
-                "jsonBody": "={{ JSON.stringify({ q: ($json.query_text || '') + ($json.geo ? ' ' + $json.geo : '') + ' singapore', gl: 'sg', hl: 'en', num: 20 }) }}",
+                "jsonBody": "={{ JSON.stringify({ q: $json._search_query, gl: 'sg', hl: 'en', num: 20 }) }}",
                 "options": {
                     "timeout": 30000
                 }
@@ -75,21 +88,34 @@
             "type": "n8n-nodes-base.httpRequest",
             "typeVersion": 4.2,
             "position": [
-                700,
+                850,
                 300
             ],
             "continueOnFail": true
         },
         {
             "parameters": {
-                "jsCode": "// Parse Serper response and extract domains\nconst serp = $input.item.json;\n\n// Debug: log what we received\nconsole.log('Serper response keys:', Object.keys(serp));\n\nconst results = [];\n\n// Serper uses 'organic' for organic results\nconst organic = serp.organic || serp.organicResults || [];\n// Serper uses 'places' for local pack\nconst places = serp.places || serp.localResults || [];\n\nfunction isValidDomain(d) {\n  if (!d || typeof d !== 'string') return false;\n  const t = d.trim().toLowerCase();\n  return t && t !== 'null' && t !== 'undefined' && t.length >= 4 && t.includes('.');\n}\n\n// Process organic results\nfor (const r of organic) {\n  const link = r.link || r.url || '';\n  if (!link) continue;\n  try {\n    const domain = new URL(link).hostname.replace(/^www\\./, '');\n    if (!isValidDomain(domain)) continue;\n    results.push({\n      rank_position: r.position || results.length + 1,\n      block_type: 'organic',\n      title: String(r.title || '').substring(0, 500),\n      url: link,\n      domain: domain,\n      snippet: String(r.snippet || '').substring(0, 1000)\n    });\n  } catch (e) {\n    console.log('Failed to parse URL:', link, e.message);\n  }\n}\n\n// Process local pack\nlet pos = 1;\nfor (const r of places) {\n  const website = r.website || r.link || '';\n  if (!website) { pos++; continue; }\n  try {\n    const domain = new URL(website).hostname.replace(/^www\\./, '');\n    if (!isValidDomain(domain)) { pos++; continue; }\n    results.push({\n      rank_position: pos,\n      block_type: 'local_pack',\n      title: String(r.title || r.name || '').substring(0, 500),\n      url: website,\n      domain: domain,\n      snippet: String(r.address || '').substring(0, 1000)\n    });\n  } catch (e) {\n    console.log('Failed to parse website:', website, e.message);\n  }\n  pos++;\n}\n\nconsole.log('Parsed results count:', results.length);\n\nif (results.length === 0) {\n  return [{ json: { _skip: true, _debug: 'no_valid_results', _organic_count: organic.length, _places_count: places.length } }];\n}\n\nreturn results.map(r => ({ json: r }));"
+                "jsCode": "// Merge Serper response with stored query context\n// CRITICAL: We must get query context from Build Query node\nconst serp = $input.item.json;\n\n// Access the previous node's data that was passed through\n// Since HTTP request replaces data, we need to reconstruct\n// The searchQuery was sent to Serper and returned in searchParameters\nconst searchParams = serp.searchParameters || {};\nconst hash = searchParams.q || 'unknown-' + Date.now();\n\n// We need query_id - we'll have to find it from the execution context\n// For now, store the raw SERP data with a hash for later matching\nreturn [{ json: {\n  _hash: hash,\n  _serp: serp,\n  organic: serp.organic || [],\n  places: serp.places || []\n}}];"
+            },
+            "id": "w2-merge-serp",
+            "name": "Merge SERP",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1050,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "jsCode": "// Parse Serper response and extract domains\nconst data = $input.item.json;\nconst organic = data.organic || [];\nconst places = data.places || [];\nconst results = [];\n\nfunction isValidDomain(d) {\n  if (!d || typeof d !== 'string') return false;\n  const t = d.trim().toLowerCase();\n  return t && t !== 'null' && t !== 'undefined' && t.length >= 4 && t.includes('.');\n}\n\n// Process organic results\nfor (const r of organic) {\n  const link = r.link || r.url || '';\n  if (!link) continue;\n  try {\n    const domain = new URL(link).hostname.replace(/^www\\./, '');\n    if (!isValidDomain(domain)) continue;\n    results.push({\n      rank_position: r.position || results.length + 1,\n      block_type: 'organic',\n      title: String(r.title || '').substring(0, 500),\n      url: link,\n      domain: domain,\n      snippet: String(r.snippet || '').substring(0, 1000)\n    });\n  } catch (e) {}\n}\n\n// Process local pack\nlet pos = 1;\nfor (const r of places) {\n  const website = r.website || r.link || '';\n  if (!website) { pos++; continue; }\n  try {\n    const domain = new URL(website).hostname.replace(/^www\\./, '');\n    if (!isValidDomain(domain)) { pos++; continue; }\n    results.push({\n      rank_position: pos,\n      block_type: 'local_pack',\n      title: String(r.title || r.name || '').substring(0, 500),\n      url: website,\n      domain: domain,\n      snippet: String(r.address || '').substring(0, 1000)\n    });\n  } catch (e) {}\n  pos++;\n}\n\nif (results.length === 0) {\n  return [{ json: { _skip: true, _debug: 'no_valid_results' } }];\n}\n\nreturn results.map(r => ({ json: r }));"
             },
             "id": "w2-parse",
             "name": "Parse SERP Results",
             "type": "n8n-nodes-base.code",
             "typeVersion": 2,
             "position": [
-                900,
+                1250,
                 300
             ]
         },
@@ -109,7 +135,7 @@
             "type": "n8n-nodes-base.if",
             "typeVersion": 2,
             "position": [
-                1100,
+                1450,
                 300
             ]
         },
@@ -123,7 +149,7 @@
             "type": "n8n-nodes-base.postgres",
             "typeVersion": 2.6,
             "position": [
-                1300,
+                1650,
                 250
             ],
             "credentials": {
@@ -141,7 +167,7 @@
             "type": "n8n-nodes-base.noOp",
             "typeVersion": 1,
             "position": [
-                1500,
+                1850,
                 250
             ]
         }
@@ -173,6 +199,17 @@
             "main": [
                 [
                     {
+                        "node": "Build Query",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Build Query": {
+            "main": [
+                [
+                    {
                         "node": "Serper Search",
                         "type": "main",
                         "index": 0
@@ -181,6 +218,17 @@
             ]
         },
         "Serper Search": {
+            "main": [
+                [
+                    {
+                        "node": "Merge SERP",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Merge SERP": {
             "main": [
                 [
                     {
