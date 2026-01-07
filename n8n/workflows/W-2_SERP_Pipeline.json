@@ -62,8 +62,8 @@
         {
             "parameters": {
                 "engine": "google",
-                "q": "={{ $json.query_text }}",
-                "location": "={{ $json._geo || 'Singapore' }}",
+                "q": "={{ $json.query_text + ($json._geo ? ' ' + $json._geo : '') + ' singapore' }}",
+                "location": "Singapore",
                 "google_domain": "google.com.sg",
                 "gl": "sg",
                 "hl": "en",
