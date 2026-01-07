@@ -153,15 +153,28 @@
         },
         {
             "parameters": {
+                "jsCode": "// Store current item data before DB call\nconst item = $input.item.json;\nreturn [{ json: { _parseData: item } }];"
+            },
+            "id": "w2-store-parse-data",
+            "name": "Store Parse Data",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1750,
+                250
+            ]
+        },
+        {
+            "parameters": {
                 "operation": "executeQuery",
-                "query": "INSERT INTO wellness.domains (domain, discovery_state)\nVALUES ('{{ $json.domain }}', 'pending')\nON CONFLICT (domain) DO UPDATE SET domain = EXCLUDED.domain\nRETURNING id;"
+                "query": "INSERT INTO wellness.domains (domain, discovery_state)\nVALUES ('{{ $node['Store Parse Data'].json._parseData.domain }}', 'pending')\nON CONFLICT (domain) DO UPDATE SET domain = EXCLUDED.domain\nRETURNING id;"
             },
             "id": "w2-upsert-domain",
             "name": "Upsert Domain",
             "type": "n8n-nodes-base.postgres",
             "typeVersion": 2.6,
             "position": [
-                1800,
+                1900,
                 250
             ],
             "credentials": {
@@ -174,14 +187,14 @@
         },
         {
             "parameters": {
-                "jsCode": "// Merge domain_id back with parse results\nconst domainResult = $input.item.json;\nconst parseResult = $node['Parse Results'].json;\nreturn [{ json: { ...parseResult, domain_id: domainResult.id } }];"
+                "jsCode": "// Merge domain_id back with stored parse data\nconst domainResult = $input.item.json;\nconst parseData = $node['Store Parse Data'].json._parseData;\nreturn [{ json: { ...parseData, domain_id: domainResult.id } }];"
             },
             "id": "w2-merge-domain-id",
             "name": "Merge Domain ID",
             "type": "n8n-nodes-base.code",
             "typeVersion": 2,
             "position": [
-                2000,
+                2100,
                 250
             ]
         },
@@ -299,7 +312,7 @@
             "main": [
                 [
                     {
-                        "node": "Upsert Domain",
+                        "node": "Store Parse Data",
                         "type": "main",
                         "index": 0
                     }
@@ -307,6 +320,17 @@
                 [
                     {
                         "node": "Split Queries",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Store Parse Data": {
+            "main": [
+                [
+                    {
+                        "node": "Upsert Domain",
                         "type": "main",
                         "index": 0
                     }
