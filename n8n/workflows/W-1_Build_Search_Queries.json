@@ -1,0 +1,168 @@
+{
+    "name": "W-1: Build Search Queries",
+    "nodes": [
+        {
+            "parameters": {},
+            "id": "7f0a0c21-7001-4444-8888-111111111111",
+            "name": "Manual Trigger",
+            "type": "n8n-nodes-base.manualTrigger",
+            "typeVersion": 1,
+            "position": [
+                100,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "UPDATE wellness.jobs \nSET state = 'locked', \n    locked_at = NOW(), \n    locked_by = 'w1-worker', \n    locked_expires_at = NOW() + INTERVAL '10 minutes'\nWHERE id = (\n    SELECT id \n    FROM wellness.jobs \n    WHERE job_type = 'build_queries' \n      AND state = 'available' \n      AND available_at <= NOW()\n    ORDER BY created_at ASC\n    LIMIT 1\n    FOR UPDATE SKIP LOCKED\n)\nRETURNING *;"
+            },
+            "id": "7f0a0c21-7001-4444-8888-222222222222",
+            "name": "Claim Job",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.6,
+            "position": [
+                300,
+                300
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "postgres-creds-id",
+                    "name": "Postgres account"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "conditions": {
+                    "boolean": [
+                        {
+                            "value1": "={{$node[\"Claim Job\"].json[\"id\"] ? true : false}}",
+                            "value2": true
+                        }
+                    ]
+                }
+            },
+            "id": "7f0a0c21-7001-4444-8888-333333333333",
+            "name": "Job Found?",
+            "type": "n8n-nodes-base.if",
+            "typeVersion": 1,
+            "position": [
+                500,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "WITH generated AS (\n    SELECT \n        v.id as vertical_id,\n        TRIM(REPLACE(REPLACE(t.template, '{service}', s.service_name), '{geo}', g_mod)) as query_text,\n        g_mod as geo,\n        t.intent_tag,\n        'B' as priority_tier,\n        ROW_NUMBER() OVER (PARTITION BY v.id ORDER BY random()) as rn\n    FROM \n        wellness.verticals v\n    JOIN \n        wellness.services s ON s.vertical_id = v.id\n    CROSS JOIN \n        wellness.search_query_templates t\n    CROSS JOIN LATERAL (\n        SELECT unnest(g.modifiers) as g_mod\n        FROM wellness.geo_sets g\n    ) g\n    WHERE (v.id::text = '{{$node[\"Claim Job\"].json[\"payload\"].vertical_id}}' OR '{{$node[\"Claim Job\"].json[\"payload\"].vertical_id}}' = '')\n)\nINSERT INTO wellness.search_queries (vertical_id, query_text, geo, intent_tag, priority_tier)\nSELECT vertical_id, query_text, geo, intent_tag, priority_tier\nFROM generated\nWHERE rn <= 200\nON CONFLICT (vertical_id, query_text, geo) DO NOTHING\nRETURNING id;"
+            },
+            "id": "7f0a0c21-7001-4444-8888-444444444444",
+            "name": "Build Queries",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.6,
+            "position": [
+                700,
+                200
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "postgres-creds-id",
+                    "name": "Postgres account"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "operation": "update",
+                "table": {
+                    "mode": "name",
+                    "value": "jobs",
+                    "schema": "wellness"
+                },
+                "whereColumns": [
+                    "id"
+                ],
+                "valuesSend": "fields",
+                "fieldsToUpdate": {
+                    "values": [
+                        {
+                            "column": "state",
+                            "value": "done"
+                        },
+                        {
+                            "column": "result_json",
+                            "value": "={{JSON.stringify({ \"queries_generated\": $node[\"Build Queries\"].json.length })}}"
+                        }
+                    ]
+                }
+            },
+            "id": "7f0a0c21-7001-4444-8888-555555555555",
+            "name": "Complete Job",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.6,
+            "position": [
+                900,
+                200
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "postgres-creds-id",
+                    "name": "Postgres account"
+                }
+            }
+        }
+    ],
+    "connections": {
+        "Manual Trigger": {
+            "main": [
+                [
+                    {
+                        "node": "Claim Job",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Claim Job": {
+            "main": [
+                [
+                    {
+                        "node": "Job Found?",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Job Found?": {
+            "main": [
+                [
+                    {
+                        "node": "Build Queries",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                null
+            ]
+        },
+        "Build Queries": {
+            "main": [
+                [
+                    {
+                        "node": "Complete Job",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        }
+    },
+    "settings": {},
+    "active": false,
+    "meta": {
+        "instanceId": "ami-local-instance"
+    }
+}

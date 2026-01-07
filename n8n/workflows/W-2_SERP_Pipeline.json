@@ -1,0 +1,310 @@
+{
+    "name": "W-2: SERP Pipeline",
+    "nodes": [
+        {
+            "parameters": {},
+            "id": "7f0a0c21-7001-4444-9999-111111111111",
+            "name": "Manual Trigger",
+            "type": "n8n-nodes-base.manualTrigger",
+            "typeVersion": 1,
+            "position": [
+                100,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "UPDATE wellness.jobs \nSET state = 'locked', \n    locked_at = NOW(), \n    locked_by = 'w2-worker', \n    locked_expires_at = NOW() + INTERVAL '30 minutes'\nWHERE id = (\n    SELECT id \n    FROM wellness.jobs \n    WHERE job_type = 'serp_mining' \n      AND state = 'available' \n      AND available_at <= NOW()\n    ORDER BY created_at ASC\n    LIMIT 1\n    FOR UPDATE SKIP LOCKED\n)\nRETURNING *;"
+            },
+            "id": "7f0a0c21-7001-4444-9999-222222222222",
+            "name": "Claim Job",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.6,
+            "position": [
+                300,
+                300
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "postgres-creds-id",
+                    "name": "Postgres account"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "operation": "select",
+                "table": {
+                    "mode": "name",
+                    "value": "search_queries",
+                    "schema": "wellness"
+                },
+                "returnAll": true,
+                "whereColumns": {
+                    "values": [
+                        {
+                            "column": "active",
+                            "value": true
+                        },
+                        {
+                            "column": "priority_tier",
+                            "operator": "in",
+                            "value": "A,B"
+                        }
+                    ]
+                }
+            },
+            "id": "7f0a0c21-7001-4444-9999-333333333333",
+            "name": "Get Queries",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.6,
+            "position": [
+                500,
+                300
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "postgres-creds-id",
+                    "name": "Postgres account"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "batchSize": 1,
+                "options": {}
+            },
+            "id": "7f0a0c21-7001-4444-9999-444444444444",
+            "name": "Split Queries",
+            "type": "n8n-nodes-base.splitInBatches",
+            "typeVersion": 1,
+            "position": [
+                700,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "url": "https://serpapi.com/search.json",
+                "authentication": "genericCredentialType",
+                "genericAuthType": "httpQueryAuth",
+                "options": {},
+                "queryParameters": {
+                    "parameters": [
+                        {
+                            "name": "q",
+                            "value": "={{$node[\"Split Queries\"].json[\"query_text\"] + ($node[\"Split Queries\"].json[\"geo\"] ? \" \" + $node[\"Split Queries\"].json[\"geo\"] : \"\") + \" singapore\"}}"
+                        },
+                        {
+                            "name": "engine",
+                            "value": "google"
+                        },
+                        {
+                            "name": "location",
+                            "value": "Singapore"
+                        },
+                        {
+                            "name": "google_domain",
+                            "value": "google.com.sg"
+                        },
+                        {
+                            "name": "gl",
+                            "value": "sg"
+                        },
+                        {
+                            "name": "hl",
+                            "value": "en"
+                        }
+                    ]
+                }
+            },
+            "id": "7f0a0c21-7001-4444-9999-555555555555",
+            "name": "SerpAPI Call",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 3,
+            "position": [
+                900,
+                300
+            ],
+            "credentials": {
+                "httpQueryAuth": {
+                    "id": "serpapi-creds-id",
+                    "name": "SerpAPI Key"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "operation": "insert",
+                "table": {
+                    "mode": "name",
+                    "value": "serp_snapshots",
+                    "schema": "wellness"
+                },
+                "valuesSend": "fields",
+                "fieldsToInsert": {
+                    "values": [
+                        {
+                            "column": "query_id",
+                            "value": "={{$node[\"Split Queries\"].json[\"id\"]}}"
+                        },
+                        {
+                            "column": "raw_json",
+                            "value": "={{JSON.stringify($node[\"SerpAPI Call\"].json)}}"
+                        },
+                        {
+                            "column": "raw_hash",
+                            "value": "={{$node[\"SerpAPI Call\"].json.search_metadata.id}}"
+                        }
+                    ]
+                }
+            },
+            "id": "7f0a0c21-7001-4444-9999-666666666666",
+            "name": "Store Snapshot",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.6,
+            "position": [
+                1100,
+                300
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "postgres-creds-id",
+                    "name": "Postgres account"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "jsCode": "// Extract organic results and local pack\nconst snapshot = $node[\"SerpAPI Call\"].json;\nconst vertical_id = $node[\"Split Queries\"].json[\"vertical_id\"];\nconst snapshot_id = $node[\"Store Snapshot\"].json[\"id\"];\n\nconst results = [];\n\nif (snapshot.organic_results) {\n  snapshot.organic_results.forEach(r => {\n    const domain = new URL(r.link).hostname.replace('www.', '');\n    results.push({\n      snapshot_id,\n      rank_position: r.position,\n      block_type: 'organic',\n      title: r.title,\n      url: r.link,\n      domain,\n      snippet: r.snippet,\n      vertical_id\n    });\n  });\n}\n\nif (snapshot.local_results) {\n  snapshot.local_results.forEach(r => {\n    const domain = r.website ? new URL(r.website).hostname.replace('www.', '') : null;\n    results.push({\n      snapshot_id,\n      rank_position: r.position,\n      block_type: 'local_pack',\n      title: r.title,\n      url: r.website,\n      domain,\n      vertical_id\n    });\n  });\n}\n\nreturn results;"
+            },
+            "id": "7f0a0c21-7001-4444-9999-777777777777",
+            "name": "Parse Results",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 1,
+            "position": [
+                1300,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "operation": "upsert",
+                "table": {
+                    "mode": "name",
+                    "value": "domains",
+                    "schema": "wellness"
+                },
+                "columnToTestOn": "domain",
+                "valuesSend": "fields",
+                "fieldsToInsert": {
+                    "values": [
+                        {
+                            "column": "domain",
+                            "value": "={{$json[\"domain\"]}}"
+                        }
+                    ]
+                }
+            },
+            "id": "7f0a0c21-7001-4444-9999-888888888888",
+            "name": "Upsert Domains",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.6,
+            "position": [
+                1500,
+                300
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "postgres-creds-id",
+                    "name": "Postgres account"
+                }
+            }
+        }
+    ],
+    "connections": {
+        "Manual Trigger": {
+            "main": [
+                [
+                    {
+                        "node": "Claim Job",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Claim Job": {
+            "main": [
+                [
+                    {
+                        "node": "Get Queries",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Get Queries": {
+            "main": [
+                [
+                    {
+                        "node": "Split Queries",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Split Queries": {
+            "main": [
+                [
+                    {
+                        "node": "SerpAPI Call",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "SerpAPI Call": {
+            "main": [
+                [
+                    {
+                        "node": "Store Snapshot",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Store Snapshot": {
+            "main": [
+                [
+                    {
+                        "node": "Parse Results",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Parse Results": {
+            "main": [
+                [
+                    {
+                        "node": "Upsert Domains",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        }
+    },
+    "settings": {},
+    "active": false,
+    "meta": {
+        "instanceId": "ami-local-instance"
+    }
+}

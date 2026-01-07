@@ -1,0 +1,275 @@
+{
+    "name": "W-3: Site Discovery",
+    "nodes": [
+        {
+            "parameters": {},
+            "id": "7f0a0c21-7001-4444-aaaa-111111111111",
+            "name": "Manual Trigger",
+            "type": "n8n-nodes-base.manualTrigger",
+            "typeVersion": 1,
+            "position": [
+                100,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "UPDATE wellness.jobs \nSET state = 'locked', \n    locked_at = NOW(), \n    locked_by = 'w3-worker', \n    locked_expires_at = NOW() + INTERVAL '60 minutes'\nWHERE id = (\n    SELECT id \n    FROM wellness.jobs \n    WHERE job_type = 'site_discovery' \n      AND state = 'available' \n      AND available_at <= NOW()\n    ORDER BY created_at ASC\n    LIMIT 1\n    FOR UPDATE SKIP LOCKED\n)\nRETURNING *;"
+            },
+            "id": "7f0a0c21-7001-4444-aaaa-222222222222",
+            "name": "Claim Job",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.6,
+            "position": [
+                300,
+                300
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "postgres-creds-id",
+                    "name": "Postgres account"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "operation": "select",
+                "table": {
+                    "mode": "name",
+                    "value": "domains",
+                    "schema": "wellness"
+                },
+                "returnAll": true,
+                "whereColumns": {
+                    "values": [
+                        {
+                            "column": "discovery_state",
+                            "value": "pending"
+                        }
+                    ]
+                }
+            },
+            "id": "7f0a0c21-7001-4444-aaaa-333333333333",
+            "name": "Get Domains",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.6,
+            "position": [
+                500,
+                300
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "postgres-creds-id",
+                    "name": "Postgres account"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "batchSize": 1,
+                "options": {}
+            },
+            "id": "7f0a0c21-7001-4444-aaaa-444444444444",
+            "name": "Split Domains",
+            "type": "n8n-nodes-base.splitInBatches",
+            "typeVersion": 1,
+            "position": [
+                700,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "method": "POST",
+                "url": "http://services-robots:8000/check",
+                "sendBody": true,
+                "specifyBody": "json",
+                "jsonBody": "={\n  \"url\": \"https://\" + $json[\"domain\"],\n  \"robots_txt_url\": \"https://\" + $json[\"domain\"] + \"/robots.txt\"\n}",
+                "options": {}
+            },
+            "id": "7f0a0c21-7001-4444-aaaa-555555555555",
+            "name": "Check Robots",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                900,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "jsCode": "// Define candidate sitemaps\nconst domain = $node[\"Split Domains\"].json[\"domain\"];\nreturn [\n  { url: `https://${domain}/sitemap.xml` },\n  { url: `https://${domain}/sitemap_index.xml` },\n  { url: `https://${domain}/wp-sitemap.xml` }\n];"
+            },
+            "id": "7f0a0c21-7001-4444-aaaa-666666666666",
+            "name": "Sitemap Candidates",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 1,
+            "position": [
+                1100,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "url": "={{$json[\"url\"]}}",
+                "options": {}
+            },
+            "id": "7f0a0c21-7001-4444-aaaa-777777777777",
+            "name": "Fetch Sitemap",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                1300,
+                300
+            ],
+            "continueOnFail": true
+        },
+        {
+            "parameters": {
+                "options": {}
+            },
+            "id": "7f0a0c21-7001-4444-aaaa-888888888888",
+            "name": "Parse XML",
+            "type": "n8n-nodes-base.xml",
+            "typeVersion": 1,
+            "position": [
+                1500,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "operation": "upsert",
+                "table": {
+                    "mode": "name",
+                    "value": "pages",
+                    "schema": "wellness"
+                },
+                "columnToTestOn": "url",
+                "valuesSend": "fields",
+                "fieldsToInsert": {
+                    "values": [
+                        {
+                            "column": "domain_id",
+                            "value": "={{$node[\"Split Domains\"].json[\"id\"]}}"
+                        },
+                        {
+                            "column": "url",
+                            "value": "={{$json[\"urlset\"] ? $json[\"urlset\"][\"url\"] : ($json[\"sitemapindex\"] ? $json[\"sitemapindex\"][\"sitemap\"] : [])}}"
+                        }
+                    ]
+                }
+            },
+            "id": "7f0a0c21-7001-4444-aaaa-999999999999",
+            "name": "Upsert Pages",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.6,
+            "position": [
+                1700,
+                300
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "postgres-creds-id",
+                    "name": "Postgres account"
+                }
+            }
+        }
+    ],
+    "connections": {
+        "Manual Trigger": {
+            "main": [
+                [
+                    {
+                        "node": "Claim Job",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Claim Job": {
+            "main": [
+                [
+                    {
+                        "node": "Get Domains",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Get Domains": {
+            "main": [
+                [
+                    {
+                        "node": "Split Domains",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Split Domains": {
+            "main": [
+                [
+                    {
+                        "node": "Check Robots",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Check Robots": {
+            "main": [
+                [
+                    {
+                        "node": "Sitemap Candidates",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Sitemap Candidates": {
+            "main": [
+                [
+                    {
+                        "node": "Fetch Sitemap",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Fetch Sitemap": {
+            "main": [
+                [
+                    {
+                        "node": "Parse XML",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Parse XML": {
+            "main": [
+                [
+                    {
+                        "node": "Upsert Pages",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        }
+    },
+    "settings": {},
+    "active": false,
+    "meta": {
+        "instanceId": "ami-local-instance"
+    }
+}

@@ -7,27 +7,27 @@ This is the granular task checklist for the AMI implementation. Update status as
 ## Phase 1: Infrastructure & Seeding
 
 ### 1.1 Schema Migrations
-- [ ] T-101: Create `001_core_entities.sql` (verticals, services, geo_sets, templates)
-- [ ] T-102: Create `002_clinics_domains.sql`
-- [ ] T-103: Create `003_serp_tables.sql`
-- [ ] T-104: Create `004_discovery_inventory.sql` (sitemaps, pages)
-- [ ] T-105: Create `005_crawl_tables.sql` (page_fetches, page_content)
-- [ ] T-106: Create `006_enrichment_tables.sql` (page_seo, page_keywords, clinic_keywords)
-- [ ] T-107: Create `007_commercial_facts.sql` (clinic_offers, clinic_ctas)
-- [ ] T-108: Create `008_ops_tables.sql` (runs, jobs)
-- [ ] T-109: Apply all migrations to local Postgres
+- [x] T-101: Create `001_core_entities.sql` (verticals, services, geo_sets, templates)
+- [x] T-102: Create `002_clinics_domains.sql`
+- [x] T-103: Create `003_serp_tables.sql`
+- [x] T-104: Create `004_discovery_inventory.sql` (sitemaps, pages)
+- [x] T-105: Create `005_crawl_tables.sql` (page_fetches, page_content)
+- [x] T-106: Create `006_enrichment_tables.sql` (page_seo, page_keywords, clinic_keywords)
+- [x] T-107: Create `007_commercial_facts.sql` (clinic_offers, clinic_ctas)
+- [x] T-108: Create `008_ops_tables.sql` (runs, jobs)
+- [x] T-109: Apply all migrations to local Postgres
 
 ### 1.2 Seed Data
-- [ ] T-110: Create `seed_verticals.sql`
-- [ ] T-111: Create `seed_services.sql` (10-30 services per vertical)
-- [ ] T-112: Create `seed_geo_sets.sql`
-- [ ] T-113: Create `seed_templates.sql`
-- [ ] T-114: Apply all seeds to local Postgres
+- [x] T-110: Create `seed_verticals.sql`
+- [x] T-111: Create `seed_services.sql` (10-30 services per vertical)
+- [x] T-112: Create `seed_geo_sets.sql`
+- [x] T-113: Create `seed_templates.sql`
+- [x] T-114: Apply all seeds to local Postgres
 
 ### 1.3 Verification (Phase 1)
-- [ ] T-115: Create `tests/sql/assert_schema.sql`
-- [ ] T-116: Run schema assertions, confirm all tables exist
-- [ ] T-117: Build and test Robots Microservice (services/robots)
+- [x] T-115: Create `tests/sql/assert_schema.sql`
+- [x] T-116: Run schema assertions, confirm all tables exist
+- [x] T-117: Build and test Robots Microservice (services/robots)
 
 ---
 
