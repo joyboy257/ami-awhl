@@ -48,9 +48,22 @@
         },
         {
             "parameters": {
+                "jsCode": "// Store original query data for later use\nconst query = $input.item.json;\nreturn [{ json: { ...query, _query_id: query.id, _vertical_id: query.vertical_id, _geo: query.geo } }];"
+            },
+            "id": "w2-store-query-context",
+            "name": "Store Query Context",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                600,
+                300
+            ]
+        },
+        {
+            "parameters": {
                 "engine": "google",
                 "q": "={{ $json.query_text }}",
-                "location": "Singapore",
+                "location": "={{ $json._geo || 'Singapore' }}",
                 "google_domain": "google.com.sg",
                 "gl": "sg",
                 "hl": "en",
@@ -61,7 +74,7 @@
             "type": "n8n-nodes-base.serpApi",
             "typeVersion": 1,
             "position": [
-                700,
+                800,
                 300
             ],
             "credentials": {
@@ -74,69 +87,28 @@
         },
         {
             "parameters": {
-                "operation": "executeQuery",
-                "query": "INSERT INTO wellness.serp_snapshots (query_id, raw_json, raw_hash)\nVALUES (\n  '{{ $node[\"Split Queries\"].json.id }}'::uuid,\n  '{{ JSON.stringify($json).replace(/'/g, \"''\") }}'::jsonb,\n  '{{ $json.search_metadata ? $json.search_metadata.id : \"unknown\" }}'\n)\nRETURNING id;"
+                "jsCode": "// Merge query context with SERP response\nconst serp = $input.item.json;\nconst queryContext = $node['Store Query Context'].json;\nreturn [{ json: { ...serp, _query_id: queryContext._query_id, _vertical_id: queryContext._vertical_id, _geo: queryContext._geo } }];"
             },
-            "id": "w2-store-snapshot",
-            "name": "Store Snapshot",
-            "type": "n8n-nodes-base.postgres",
-            "typeVersion": 2.6,
-            "position": [
-                900,
-                300
-            ],
-            "credentials": {
-                "postgres": {
-                    "id": "postgres-creds-id",
-                    "name": "Postgres account"
-                }
-            }
-        },
-        {
-            "parameters": {
-                "jsCode": "// Parse SERP results into structured rows\nconst serp = $node['SerpApi Node'].json;\nconst snapshot_id = $node['Store Snapshot'].json.id;\nconst vertical_id = $node['Split Queries'].json.vertical_id;\nconst results = [];\n\n// Organic results\nif (serp.organic_results) {\n  for (const r of serp.organic_results) {\n    try {\n      const domain = new URL(r.link).hostname.replace('www.', '');\n      results.push({\n        snapshot_id,\n        rank_position: r.position,\n        block_type: 'organic',\n        title: r.title || '',\n        url: r.link,\n        domain,\n        snippet: r.snippet || '',\n        vertical_id\n      });\n    } catch (e) {}\n  }\n}\n\n// Local pack\nif (serp.local_results && serp.local_results.places) {\n  let pos = 1;\n  for (const r of serp.local_results.places) {\n    const domain = r.website ? new URL(r.website).hostname.replace('www.', '') : null;\n    results.push({\n      snapshot_id,\n      rank_position: pos++,\n      block_type: 'local_pack',\n      title: r.title || '',\n      url: r.website || '',\n      domain,\n      snippet: r.address || '',\n      vertical_id\n    });\n  }\n}\n\nreturn results.map(r => ({ json: r }));"
-            },
-            "id": "w2-parse-results",
-            "name": "Parse Results",
+            "id": "w2-merge-context",
+            "name": "Merge Context",
             "type": "n8n-nodes-base.code",
             "typeVersion": 2,
             "position": [
-                1100,
+                1000,
                 300
             ]
         },
         {
             "parameters": {
                 "operation": "executeQuery",
-                "query": "-- Upsert domain first\nINSERT INTO wellness.domains (domain, discovery_state)\nVALUES ('{{ $json.domain }}', 'pending')\nON CONFLICT (domain) DO UPDATE SET domain = EXCLUDED.domain\nRETURNING id;"
+                "query": "INSERT INTO wellness.serp_snapshots (query_id, raw_json, raw_hash)\nVALUES (\n  '{{ $json._query_id }}'::uuid,\n  '{{ JSON.stringify($json).replace(/'/g, \"''\") }}'::jsonb,\n  '{{ $json.search_metadata ? $json.search_metadata.id : \"unknown\" }}'\n)\nRETURNING id;"
             },
-            "id": "w2-upsert-domain",
-            "name": "Upsert Domain",
+            "id": "w2-store-snapshot",
+            "name": "Store Snapshot",
             "type": "n8n-nodes-base.postgres",
             "typeVersion": 2.6,
             "position": [
-                1300,
-                300
-            ],
-            "credentials": {
-                "postgres": {
-                    "id": "postgres-creds-id",
-                    "name": "Postgres account"
-                }
-            },
-            "continueOnFail": true
-        },
-        {
-            "parameters": {
-                "operation": "executeQuery",
-                "query": "INSERT INTO wellness.serp_results (snapshot_id, rank_position, block_type, title, url, domain_id, snippet)\nVALUES (\n  '{{ $node[\"Parse Results\"].json.snapshot_id }}'::uuid,\n  {{ $node[\"Parse Results\"].json.rank_position }},\n  '{{ $node[\"Parse Results\"].json.block_type }}',\n  '{{ ($node[\"Parse Results\"].json.title || \"\").replace(/'/g, \"''\") }}',\n  '{{ $node[\"Parse Results\"].json.url }}',\n  '{{ $json.id }}'::uuid,\n  '{{ ($node[\"Parse Results\"].json.snippet || \"\").replace(/'/g, \"''\") }}'\n)\nON CONFLICT (snapshot_id, rank_position, block_type) DO NOTHING\nRETURNING id;"
-            },
-            "id": "w2-insert-result",
-            "name": "Insert Result",
-            "type": "n8n-nodes-base.postgres",
-            "typeVersion": 2.6,
-            "position": [
-                1500,
+                1200,
                 300
             ],
             "credentials": {
@@ -148,16 +120,49 @@
         },
         {
             "parameters": {
-                "operation": "executeQuery",
-                "query": "-- Seed clinic if we have a new domain\nINSERT INTO wellness.clinics (name, vertical_id)\nSELECT '{{ ($node[\"Parse Results\"].json.title || \"\").replace(/'/g, \"''\") }}', '{{ $node[\"Parse Results\"].json.vertical_id }}'::uuid\nWHERE NOT EXISTS (\n  SELECT 1 FROM wellness.domains d\n  JOIN wellness.clinics c ON d.clinic_id = c.id\n  WHERE d.id = '{{ $json.id }}'::uuid AND d.clinic_id IS NOT NULL\n)\nRETURNING id;"
+                "jsCode": "// Parse SERP results into structured rows\nconst serp = $node['Merge Context'].json;\nconst snapshot_id = $input.item.json.id; // From Store Snapshot RETURNING\nconst vertical_id = serp._vertical_id;\nconst results = [];\n\n// Organic results\nif (serp.organic_results) {\n  for (const r of serp.organic_results) {\n    try {\n      const domain = new URL(r.link).hostname.replace('www.', '');\n      results.push({\n        snapshot_id,\n        rank_position: r.position,\n        block_type: 'organic',\n        title: r.title || '',\n        url: r.link,\n        domain,\n        snippet: r.snippet || '',\n        vertical_id\n      });\n    } catch (e) {}\n  }\n}\n\n// Local pack\nif (serp.local_results && serp.local_results.places) {\n  let pos = 1;\n  for (const r of serp.local_results.places) {\n    let domain = null;\n    if (r.website) {\n      try { domain = new URL(r.website).hostname.replace('www.', ''); } catch(e) {}\n    }\n    results.push({\n      snapshot_id,\n      rank_position: pos++,\n      block_type: 'local_pack',\n      title: r.title || '',\n      url: r.website || '',\n      domain,\n      snippet: r.address || '',\n      vertical_id\n    });\n  }\n}\n\nif (results.length === 0) {\n  return [{ json: { _skip: true, snapshot_id } }];\n}\n\nreturn results.map(r => ({ json: r }));"
             },
-            "id": "w2-seed-clinic",
-            "name": "Seed Clinic",
+            "id": "w2-parse-results",
+            "name": "Parse Results",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1400,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "conditions": {
+                    "boolean": [
+                        {
+                            "value1": "={{ $json._skip !== true && $json.domain !== null }}",
+                            "value2": true
+                        }
+                    ]
+                }
+            },
+            "id": "w2-filter-valid",
+            "name": "Filter Valid",
+            "type": "n8n-nodes-base.if",
+            "typeVersion": 2,
+            "position": [
+                1600,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "INSERT INTO wellness.domains (domain, discovery_state)\nVALUES ('{{ $json.domain }}', 'pending')\nON CONFLICT (domain) DO UPDATE SET domain = EXCLUDED.domain\nRETURNING id;"
+            },
+            "id": "w2-upsert-domain",
+            "name": "Upsert Domain",
             "type": "n8n-nodes-base.postgres",
             "typeVersion": 2.6,
             "position": [
-                1700,
-                300
+                1800,
+                250
             ],
             "credentials": {
                 "postgres": {
@@ -166,6 +171,39 @@
                 }
             },
             "continueOnFail": true
+        },
+        {
+            "parameters": {
+                "jsCode": "// Merge domain_id back with parse results\nconst domainResult = $input.item.json;\nconst parseResult = $node['Parse Results'].json;\nreturn [{ json: { ...parseResult, domain_id: domainResult.id } }];"
+            },
+            "id": "w2-merge-domain-id",
+            "name": "Merge Domain ID",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                2000,
+                250
+            ]
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "INSERT INTO wellness.serp_results (snapshot_id, rank_position, block_type, title, url, domain_id, snippet)\nVALUES (\n  '{{ $json.snapshot_id }}'::uuid,\n  {{ $json.rank_position }},\n  '{{ $json.block_type }}',\n  '{{ ($json.title || \"\").replace(/'/g, \"''\") }}',\n  '{{ $json.url }}',\n  '{{ $json.domain_id }}'::uuid,\n  '{{ ($json.snippet || \"\").replace(/'/g, \"''\") }}'\n)\nON CONFLICT (snapshot_id, rank_position, block_type) DO NOTHING\nRETURNING id;"
+            },
+            "id": "w2-insert-result",
+            "name": "Insert Result",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.6,
+            "position": [
+                2200,
+                250
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "postgres-creds-id",
+                    "name": "Postgres account"
+                }
+            }
         }
     ],
     "connections": {
@@ -195,6 +233,17 @@
             "main": [
                 [
                     {
+                        "node": "Store Query Context",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Store Query Context": {
+            "main": [
+                [
+                    {
                         "node": "SerpApi Node",
                         "type": "main",
                         "index": 0
@@ -203,6 +252,17 @@
             ]
         },
         "SerpApi Node": {
+            "main": [
+                [
+                    {
+                        "node": "Merge Context",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Merge Context": {
             "main": [
                 [
                     {
@@ -228,29 +288,41 @@
             "main": [
                 [
                     {
-                        "node": "Upsert Domain",
+                        "node": "Filter Valid",
                         "type": "main",
                         "index": 0
                     }
                 ]
+            ]
+        },
+        "Filter Valid": {
+            "main": [
+                [
+                    {
+                        "node": "Upsert Domain",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                []
             ]
         },
         "Upsert Domain": {
             "main": [
                 [
                     {
-                        "node": "Insert Result",
+                        "node": "Merge Domain ID",
                         "type": "main",
                         "index": 0
                     }
                 ]
             ]
         },
-        "Insert Result": {
+        "Merge Domain ID": {
             "main": [
                 [
                     {
-                        "node": "Seed Clinic",
+                        "node": "Insert Result",
                         "type": "main",
                         "index": 0
                     }
