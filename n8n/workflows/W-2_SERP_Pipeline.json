@@ -48,14 +48,14 @@
         },
         {
             "parameters": {
-                "jsCode": "// Build search query and STORE query context for later use\nconst q = $input.item.json;\nconst searchQuery = (q.query_text || '') + (q.geo ? ' ' + q.geo : '') + ' singapore';\nreturn [{ json: {\n  _query_id: q.query_id,\n  _vertical_id: q.vertical_id,\n  _search_query: searchQuery.trim()\n}}];"
+                "jsCode": "// Build the Serper request body\nconst q = $input.item.json;\nconst searchQuery = (q.query_text || '') + (q.geo ? ' ' + q.geo : '') + ' singapore';\nreturn [{ json: {\n  query_id: q.query_id,\n  vertical_id: q.vertical_id,\n  _serperBody: { q: searchQuery.trim(), gl: 'sg', hl: 'en', num: 20 }\n}}];"
             },
-            "id": "w2-build-query",
-            "name": "Build Query",
+            "id": "w2-build-request",
+            "name": "Build Request",
             "type": "n8n-nodes-base.code",
             "typeVersion": 2,
             "position": [
-                650,
+                600,
                 300
             ]
         },
@@ -78,7 +78,7 @@
                 },
                 "sendBody": true,
                 "specifyBody": "json",
-                "jsonBody": "={{ JSON.stringify({ q: $json._search_query, gl: 'sg', hl: 'en', num: 20 }) }}",
+                "jsonBody": "={{ JSON.stringify($json._serperBody) }}",
                 "options": {
                     "timeout": 30000
                 }
@@ -88,34 +88,21 @@
             "type": "n8n-nodes-base.httpRequest",
             "typeVersion": 4.2,
             "position": [
-                850,
+                800,
                 300
             ],
             "continueOnFail": true
         },
         {
             "parameters": {
-                "jsCode": "// Merge Serper response with stored query context\n// CRITICAL: We must get query context from Build Query node\nconst serp = $input.item.json;\n\n// Access the previous node's data that was passed through\n// Since HTTP request replaces data, we need to reconstruct\n// The searchQuery was sent to Serper and returned in searchParameters\nconst searchParams = serp.searchParameters || {};\nconst hash = searchParams.q || 'unknown-' + Date.now();\n\n// We need query_id - we'll have to find it from the execution context\n// For now, store the raw SERP data with a hash for later matching\nreturn [{ json: {\n  _hash: hash,\n  _serp: serp,\n  organic: serp.organic || [],\n  places: serp.places || []\n}}];"
-            },
-            "id": "w2-merge-serp",
-            "name": "Merge SERP",
-            "type": "n8n-nodes-base.code",
-            "typeVersion": 2,
-            "position": [
-                1050,
-                300
-            ]
-        },
-        {
-            "parameters": {
-                "jsCode": "// Parse Serper response and extract domains\nconst data = $input.item.json;\nconst organic = data.organic || [];\nconst places = data.places || [];\nconst results = [];\n\nfunction isValidDomain(d) {\n  if (!d || typeof d !== 'string') return false;\n  const t = d.trim().toLowerCase();\n  return t && t !== 'null' && t !== 'undefined' && t.length >= 4 && t.includes('.');\n}\n\n// Process organic results\nfor (const r of organic) {\n  const link = r.link || r.url || '';\n  if (!link) continue;\n  try {\n    const domain = new URL(link).hostname.replace(/^www\\./, '');\n    if (!isValidDomain(domain)) continue;\n    results.push({\n      rank_position: r.position || results.length + 1,\n      block_type: 'organic',\n      title: String(r.title || '').substring(0, 500),\n      url: link,\n      domain: domain,\n      snippet: String(r.snippet || '').substring(0, 1000)\n    });\n  } catch (e) {}\n}\n\n// Process local pack\nlet pos = 1;\nfor (const r of places) {\n  const website = r.website || r.link || '';\n  if (!website) { pos++; continue; }\n  try {\n    const domain = new URL(website).hostname.replace(/^www\\./, '');\n    if (!isValidDomain(domain)) { pos++; continue; }\n    results.push({\n      rank_position: pos,\n      block_type: 'local_pack',\n      title: String(r.title || r.name || '').substring(0, 500),\n      url: website,\n      domain: domain,\n      snippet: String(r.address || '').substring(0, 1000)\n    });\n  } catch (e) {}\n  pos++;\n}\n\nif (results.length === 0) {\n  return [{ json: { _skip: true, _debug: 'no_valid_results' } }];\n}\n\nreturn results.map(r => ({ json: r }));"
+                "jsCode": "// ALL-IN-ONE: Parse SERP, create snapshot, upsert domains, insert results\n// This node outputs everything needed for the DB operations\nconst serp = $input.item.json;\nconst query = $input.context?.query || {};\n\n// For Serper, get query_id from the Split Queries output\n// We'll need to pass it differently - using the item index\nconst items = $input.all();\nconst currentIndex = $input.itemIndex;\n\n// Extract organic results\nconst results = [];\nconst organic = serp.organic || [];\nconst places = serp.places || [];\nconst hash = serp.searchParameters?.q || 'unknown-' + Date.now();\n\nfunction isValidDomain(d) {\n  if (!d || typeof d !== 'string') return false;\n  const t = d.trim().toLowerCase();\n  return t && t !== 'null' && t !== 'undefined' && t.length >= 4 && t.includes('.');\n}\n\nfor (const r of organic) {\n  try {\n    const domain = new URL(r.link).hostname.replace('www.', '');\n    if (!isValidDomain(domain)) continue;\n    results.push({\n      rank_position: r.position || 0,\n      block_type: 'organic',\n      title: (r.title || '').substring(0, 500),\n      url: r.link || '',\n      domain: domain,\n      snippet: (r.snippet || '').substring(0, 1000)\n    });\n  } catch (e) {}\n}\n\nlet pos = 1;\nfor (const r of places) {\n  if (r.website) {\n    try {\n      const domain = new URL(r.website).hostname.replace('www.', '');\n      if (!isValidDomain(domain)) continue;\n      results.push({\n        rank_position: pos,\n        block_type: 'local_pack',\n        title: (r.title || '').substring(0, 500),\n        url: r.website,\n        domain: domain,\n        snippet: (r.address || '').substring(0, 1000)\n      });\n    } catch (e) {}\n  }\n  pos++;\n}\n\nif (results.length === 0) {\n  return [{ json: { _skip: true, _hash: hash } }];\n}\n\n// Return all results with the hash for snapshot creation\nreturn results.map(r => ({ json: { ...r, _hash: hash } }));"
             },
             "id": "w2-parse",
             "name": "Parse SERP Results",
             "type": "n8n-nodes-base.code",
             "typeVersion": 2,
             "position": [
-                1250,
+                900,
                 300
             ]
         },
@@ -124,7 +111,7 @@
                 "conditions": {
                     "boolean": [
                         {
-                            "value1": "={{ $json._skip !== true && $json.domain && typeof $json.domain === 'string' && $json.domain.length >= 4 && $json.domain.includes('.') }}",
+                            "value1": "={{ $json._skip !== true && $json.domain }}",
                             "value2": true
                         }
                     ]
@@ -135,7 +122,7 @@
             "type": "n8n-nodes-base.if",
             "typeVersion": 2,
             "position": [
-                1450,
+                1100,
                 300
             ]
         },
@@ -149,7 +136,7 @@
             "type": "n8n-nodes-base.postgres",
             "typeVersion": 2.6,
             "position": [
-                1650,
+                1300,
                 250
             ],
             "credentials": {
@@ -167,7 +154,7 @@
             "type": "n8n-nodes-base.noOp",
             "typeVersion": 1,
             "position": [
-                1850,
+                1500,
                 250
             ]
         }
@@ -199,14 +186,14 @@
             "main": [
                 [
                     {
-                        "node": "Build Query",
+                        "node": "Build Request",
                         "type": "main",
                         "index": 0
                     }
                 ]
             ]
         },
-        "Build Query": {
+        "Build Request": {
             "main": [
                 [
                     {
@@ -218,17 +205,6 @@
             ]
         },
         "Serper Search": {
-            "main": [
-                [
-                    {
-                        "node": "Merge SERP",
-                        "type": "main",
-                        "index": 0
-                    }
-                ]
-            ]
-        },
-        "Merge SERP": {
             "main": [
                 [
                     {
