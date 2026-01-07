@@ -139,7 +139,7 @@
         },
         {
             "parameters": {
-                "jsCode": "// Parse sitemap XML and extract URLs\nconst xml = $input.item.json.data || $input.item.json.body || '';\nconst domain_id = $node['Sitemap Candidates'].json.domain_id;\nconst urls = [];\n\n// Simple regex extraction for <loc> tags\nconst locMatches = xml.match(/<loc>([^<]+)<\\/loc>/g) || [];\nfor (const match of locMatches) {\n  const url = match.replace('<loc>', '').replace('</loc>', '').trim();\n  if (url && url.startsWith('http')) {\n    urls.push({ domain_id, url });\n  }\n}\n\nreturn urls.slice(0, 100).map(u => ({ json: u }));"
+                "jsCode": "// Parse sitemap XML and extract URLs\n// Get XML from Fetch Sitemap, not from Upsert Sitemap (which only has ID)\nconst fetchResult = $node['Fetch Sitemap'].json;\nconst xml = fetchResult.data || fetchResult.body || (typeof fetchResult === 'string' ? fetchResult : '');\nconst domain_id = $node['Sitemap Candidates'].json.domain_id;\nconst urls = [];\n\nif (!xml || typeof xml !== 'string') {\n  // No valid XML, return empty\n  return [];\n}\n\n// Simple regex extraction for <loc> tags\nconst locMatches = xml.match(/<loc>([^<]+)<\\/loc>/g) || [];\nfor (const match of locMatches) {\n  const url = match.replace('<loc>', '').replace('</loc>', '').trim();\n  if (url && url.startsWith('http')) {\n    urls.push({ domain_id, url });\n  }\n}\n\nif (urls.length === 0) {\n  return [];\n}\n\nreturn urls.slice(0, 100).map(u => ({ json: u }));"
             },
             "id": "w3-parse-sitemap",
             "name": "Parse Sitemap",
@@ -296,6 +296,17 @@
                 [
                     {
                         "node": "Complete Domain",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Complete Domain": {
+            "main": [
+                [
+                    {
+                        "node": "Split Domains",
                         "type": "main",
                         "index": 0
                     }
