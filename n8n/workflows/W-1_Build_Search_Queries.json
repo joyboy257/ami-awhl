@@ -3,7 +3,7 @@
     "nodes": [
         {
             "parameters": {},
-            "id": "7f0a0c21-7001-4444-8888-111111111111",
+            "id": "w1-trigger-1",
             "name": "Manual Trigger",
             "type": "n8n-nodes-base.manualTrigger",
             "typeVersion": 1,
@@ -15,10 +15,10 @@
         {
             "parameters": {
                 "operation": "executeQuery",
-                "query": "UPDATE wellness.jobs \nSET state = 'locked', \n    locked_at = NOW(), \n    locked_by = 'w1-worker', \n    locked_expires_at = NOW() + INTERVAL '10 minutes'\nWHERE id = (\n    SELECT id \n    FROM wellness.jobs \n    WHERE job_type = 'build_queries' \n      AND state = 'available' \n      AND available_at <= NOW()\n    ORDER BY created_at ASC\n    LIMIT 1\n    FOR UPDATE SKIP LOCKED\n)\nRETURNING *;"
+                "query": "-- Read seed data for query generation\nSELECT \n  v.id as vertical_id,\n  v.name as vertical_name,\n  s.service_name,\n  t.template,\n  t.intent_tag,\n  g.modifiers as geo_modifiers\nFROM wellness.verticals v\nCROSS JOIN wellness.services s ON s.vertical_id = v.id\nCROSS JOIN wellness.search_query_templates t\nCROSS JOIN wellness.geo_sets g\nLIMIT 1000;"
             },
-            "id": "7f0a0c21-7001-4444-8888-222222222222",
-            "name": "Claim Job",
+            "id": "w1-read-seeds",
+            "name": "Read Seeds",
             "type": "n8n-nodes-base.postgres",
             "typeVersion": 2.6,
             "position": [
@@ -34,19 +34,12 @@
         },
         {
             "parameters": {
-                "conditions": {
-                    "boolean": [
-                        {
-                            "value1": "={{$node[\"Claim Job\"].json[\"id\"] ? true : false}}",
-                            "value2": true
-                        }
-                    ]
-                }
+                "jsCode": "// Generate queries from seed data\nconst items = $input.all();\nconst queries = [];\nconst seen = new Set();\n\nfor (const item of items) {\n  const { vertical_id, service_name, template, intent_tag, geo_modifiers } = item.json;\n  \n  // For each geo modifier, generate a query\n  for (const geo of geo_modifiers || ['singapore']) {\n    let queryText = template\n      .replace('{service}', service_name)\n      .replace('{geo}', geo);\n    \n    // Dedupe key\n    const key = `${vertical_id}:${queryText}:${geo}`;\n    if (seen.has(key)) continue;\n    seen.add(key);\n    \n    queries.push({\n      vertical_id,\n      query_text: queryText.trim(),\n      geo,\n      intent_tag,\n      priority_tier: 'B',\n      active: true\n    });\n    \n    // Cap at 200 per vertical\n    if (queries.filter(q => q.vertical_id === vertical_id).length >= 200) break;\n  }\n}\n\nreturn queries.map(q => ({ json: q }));"
             },
-            "id": "7f0a0c21-7001-4444-8888-333333333333",
-            "name": "Job Found?",
-            "type": "n8n-nodes-base.if",
-            "typeVersion": 1,
+            "id": "w1-generate-queries",
+            "name": "Generate Queries",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
             "position": [
                 500,
                 300
@@ -55,15 +48,15 @@
         {
             "parameters": {
                 "operation": "executeQuery",
-                "query": "WITH generated AS (\n    SELECT \n        v.id as vertical_id,\n        TRIM(REPLACE(REPLACE(t.template, '{service}', s.service_name), '{geo}', g_mod)) as query_text,\n        g_mod as geo,\n        t.intent_tag,\n        'B' as priority_tier,\n        ROW_NUMBER() OVER (PARTITION BY v.id ORDER BY random()) as rn\n    FROM \n        wellness.verticals v\n    JOIN \n        wellness.services s ON s.vertical_id = v.id\n    CROSS JOIN \n        wellness.search_query_templates t\n    CROSS JOIN LATERAL (\n        SELECT unnest(g.modifiers) as g_mod\n        FROM wellness.geo_sets g\n    ) g\n    WHERE (v.id::text = '{{$node[\"Claim Job\"].json[\"payload\"].vertical_id}}' OR '{{$node[\"Claim Job\"].json[\"payload\"].vertical_id}}' = '')\n)\nINSERT INTO wellness.search_queries (vertical_id, query_text, geo, intent_tag, priority_tier)\nSELECT vertical_id, query_text, geo, intent_tag, priority_tier\nFROM generated\nWHERE rn <= 200\nON CONFLICT (vertical_id, query_text, geo) DO NOTHING\nRETURNING id;"
+                "query": "INSERT INTO wellness.search_queries (vertical_id, query_text, geo, intent_tag, priority_tier, active)\nVALUES (\n  '{{ $json.vertical_id }}'::uuid,\n  '{{ $json.query_text }}',\n  '{{ $json.geo }}',\n  '{{ $json.intent_tag }}',\n  '{{ $json.priority_tier }}',\n  {{ $json.active }}\n)\nON CONFLICT (vertical_id, query_text, geo) DO NOTHING\nRETURNING id, query_text;"
             },
-            "id": "7f0a0c21-7001-4444-8888-444444444444",
-            "name": "Build Queries",
+            "id": "w1-insert-queries",
+            "name": "Insert Queries",
             "type": "n8n-nodes-base.postgres",
             "typeVersion": 2.6,
             "position": [
                 700,
-                200
+                300
             ],
             "credentials": {
                 "postgres": {
@@ -74,43 +67,16 @@
         },
         {
             "parameters": {
-                "operation": "update",
-                "table": {
-                    "mode": "name",
-                    "value": "jobs",
-                    "schema": "wellness"
-                },
-                "whereColumns": [
-                    "id"
-                ],
-                "valuesSend": "fields",
-                "fieldsToUpdate": {
-                    "values": [
-                        {
-                            "column": "state",
-                            "value": "done"
-                        },
-                        {
-                            "column": "result_json",
-                            "value": "={{JSON.stringify({ \"queries_generated\": $node[\"Build Queries\"].json.length })}}"
-                        }
-                    ]
-                }
+                "jsCode": "// Summarize results\nconst inserted = $input.all().filter(i => i.json.id);\nreturn [{ json: { queries_inserted: inserted.length } }];"
             },
-            "id": "7f0a0c21-7001-4444-8888-555555555555",
-            "name": "Complete Job",
-            "type": "n8n-nodes-base.postgres",
-            "typeVersion": 2.6,
+            "id": "w1-summarize",
+            "name": "Summarize",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
             "position": [
                 900,
-                200
-            ],
-            "credentials": {
-                "postgres": {
-                    "id": "postgres-creds-id",
-                    "name": "Postgres account"
-                }
-            }
+                300
+            ]
         }
     ],
     "connections": {
@@ -118,41 +84,40 @@
             "main": [
                 [
                     {
-                        "node": "Claim Job",
+                        "node": "Read Seeds",
                         "type": "main",
                         "index": 0
                     }
                 ]
             ]
         },
-        "Claim Job": {
+        "Read Seeds": {
             "main": [
                 [
                     {
-                        "node": "Job Found?",
+                        "node": "Generate Queries",
                         "type": "main",
                         "index": 0
                     }
                 ]
             ]
         },
-        "Job Found?": {
+        "Generate Queries": {
             "main": [
                 [
                     {
-                        "node": "Build Queries",
+                        "node": "Insert Queries",
                         "type": "main",
                         "index": 0
                     }
-                ],
-                null
+                ]
             ]
         },
-        "Build Queries": {
+        "Insert Queries": {
             "main": [
                 [
                     {
-                        "node": "Complete Job",
+                        "node": "Summarize",
                         "type": "main",
                         "index": 0
                     }
@@ -160,9 +125,8 @@
             ]
         }
     },
-    "settings": {},
-    "active": false,
-    "meta": {
-        "instanceId": "ami-local-instance"
-    }
+    "settings": {
+        "executionOrder": "v1"
+    },
+    "active": false
 }

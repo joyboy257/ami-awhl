@@ -34,11 +34,12 @@ This is the granular task checklist for the AMI implementation. Update status as
 ## Phase 2: Discovery & SERP (W1-W3)
 
 ### 2.1 Workflows
-- [ ] T-201: Build W1 (Build Search Queries) n8n workflow
-- [ ] T-202: Build W2A (SERP Snapshot) n8n workflow
-- [ ] T-203: Build W2B (Seed Clinics/Domains) n8n workflow
-- [ ] T-204: Build W2C (Seed Keywords) n8n workflow
-- [ ] T-205: Build W3 (Site Discovery) n8n workflow
+- [x] T-201: Build W1 (Build Search Queries) n8n workflow
+- [x] T-202: Build W2A (SERP Snapshot) n8n workflow
+- [x] T-203: Build W2B (Seed Clinics/Domains) n8n workflow
+- [x] T-204: Build W2C (Seed Keywords) n8n workflow
+- [x] T-205: Build W3 (Site Discovery) n8n workflow
+
 
 ### 2.2 Verification (Phase 2)
 - [ ] T-206: Run W1 for all 4 verticals, verify `search_queries` populated

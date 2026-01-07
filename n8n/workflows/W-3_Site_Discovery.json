@@ -3,7 +3,7 @@
     "nodes": [
         {
             "parameters": {},
-            "id": "7f0a0c21-7001-4444-aaaa-111111111111",
+            "id": "w3-trigger-1",
             "name": "Manual Trigger",
             "type": "n8n-nodes-base.manualTrigger",
             "typeVersion": 1,
@@ -15,10 +15,10 @@
         {
             "parameters": {
                 "operation": "executeQuery",
-                "query": "UPDATE wellness.jobs \nSET state = 'locked', \n    locked_at = NOW(), \n    locked_by = 'w3-worker', \n    locked_expires_at = NOW() + INTERVAL '60 minutes'\nWHERE id = (\n    SELECT id \n    FROM wellness.jobs \n    WHERE job_type = 'site_discovery' \n      AND state = 'available' \n      AND available_at <= NOW()\n    ORDER BY created_at ASC\n    LIMIT 1\n    FOR UPDATE SKIP LOCKED\n)\nRETURNING *;"
+                "query": "-- Get domains pending discovery\nSELECT d.id as domain_id, d.domain\nFROM wellness.domains d\nWHERE d.discovery_state = 'pending'\nLIMIT 20;"
             },
-            "id": "7f0a0c21-7001-4444-aaaa-222222222222",
-            "name": "Claim Job",
+            "id": "w3-get-domains",
+            "name": "Get Domains",
             "type": "n8n-nodes-base.postgres",
             "typeVersion": 2.6,
             "position": [
@@ -34,28 +34,29 @@
         },
         {
             "parameters": {
-                "operation": "select",
-                "table": {
-                    "mode": "name",
-                    "value": "domains",
-                    "schema": "wellness"
-                },
-                "returnAll": true,
-                "whereColumns": {
-                    "values": [
-                        {
-                            "column": "discovery_state",
-                            "value": "pending"
-                        }
-                    ]
-                }
+                "batchSize": 1,
+                "options": {}
             },
-            "id": "7f0a0c21-7001-4444-aaaa-333333333333",
-            "name": "Get Domains",
+            "id": "w3-split",
+            "name": "Split Domains",
+            "type": "n8n-nodes-base.splitInBatches",
+            "typeVersion": 3,
+            "position": [
+                500,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "UPDATE wellness.domains SET discovery_state = 'in_progress' WHERE id = '{{ $json.domain_id }}'::uuid;"
+            },
+            "id": "w3-lock-domain",
+            "name": "Lock Domain",
             "type": "n8n-nodes-base.postgres",
             "typeVersion": 2.6,
             "position": [
-                500,
+                700,
                 300
             ],
             "credentials": {
@@ -67,44 +68,33 @@
         },
         {
             "parameters": {
-                "batchSize": 1,
-                "options": {}
-            },
-            "id": "7f0a0c21-7001-4444-aaaa-444444444444",
-            "name": "Split Domains",
-            "type": "n8n-nodes-base.splitInBatches",
-            "typeVersion": 1,
-            "position": [
-                700,
-                300
-            ]
-        },
-        {
-            "parameters": {
                 "method": "POST",
-                "url": "http://services-robots:8000/check",
+                "url": "http://localhost:8000/check",
                 "sendBody": true,
                 "specifyBody": "json",
-                "jsonBody": "={\n  \"url\": \"https://\" + $json[\"domain\"],\n  \"robots_txt_url\": \"https://\" + $json[\"domain\"] + \"/robots.txt\"\n}",
-                "options": {}
+                "jsonBody": "={{ JSON.stringify({ url: 'https://' + $json.domain, robots_txt_url: 'https://' + $json.domain + '/robots.txt', user_agent: 'AMI-Bot' }) }}",
+                "options": {
+                    "timeout": 15000
+                }
             },
-            "id": "7f0a0c21-7001-4444-aaaa-555555555555",
+            "id": "w3-check-robots",
             "name": "Check Robots",
             "type": "n8n-nodes-base.httpRequest",
-            "typeVersion": 4,
+            "typeVersion": 4.2,
             "position": [
                 900,
                 300
-            ]
+            ],
+            "continueOnFail": true
         },
         {
             "parameters": {
-                "jsCode": "// Define candidate sitemaps\nconst domain = $node[\"Split Domains\"].json[\"domain\"];\nreturn [\n  { url: `https://${domain}/sitemap.xml` },\n  { url: `https://${domain}/sitemap_index.xml` },\n  { url: `https://${domain}/wp-sitemap.xml` }\n];"
+                "jsCode": "// Generate sitemap candidate URLs\nconst domain = $node['Split Domains'].json.domain;\nconst domain_id = $node['Split Domains'].json.domain_id;\nreturn [\n  { json: { domain_id, url: `https://${domain}/sitemap.xml`, depth: 1 } },\n  { json: { domain_id, url: `https://${domain}/sitemap_index.xml`, depth: 1 } },\n  { json: { domain_id, url: `https://${domain}/wp-sitemap.xml`, depth: 1 } },\n  { json: { domain_id, url: `https://${domain}/page-sitemap.xml`, depth: 1 } }\n];"
             },
-            "id": "7f0a0c21-7001-4444-aaaa-666666666666",
+            "id": "w3-sitemap-candidates",
             "name": "Sitemap Candidates",
             "type": "n8n-nodes-base.code",
-            "typeVersion": 1,
+            "typeVersion": 2,
             "position": [
                 1100,
                 300
@@ -112,13 +102,15 @@
         },
         {
             "parameters": {
-                "url": "={{$json[\"url\"]}}",
-                "options": {}
+                "url": "={{ $json.url }}",
+                "options": {
+                    "timeout": 20000
+                }
             },
-            "id": "7f0a0c21-7001-4444-aaaa-777777777777",
+            "id": "w3-fetch-sitemap",
             "name": "Fetch Sitemap",
             "type": "n8n-nodes-base.httpRequest",
-            "typeVersion": 4,
+            "typeVersion": 4.2,
             "position": [
                 1300,
                 300
@@ -127,46 +119,68 @@
         },
         {
             "parameters": {
-                "options": {}
+                "operation": "executeQuery",
+                "query": "INSERT INTO wellness.sitemaps (domain_id, url, depth)\nVALUES ('{{ $node[\"Sitemap Candidates\"].json.domain_id }}'::uuid, '{{ $node[\"Sitemap Candidates\"].json.url }}', {{ $node[\"Sitemap Candidates\"].json.depth }})\nON CONFLICT (domain_id, url) DO UPDATE SET last_fetched_at = NOW()\nRETURNING id;"
             },
-            "id": "7f0a0c21-7001-4444-aaaa-888888888888",
-            "name": "Parse XML",
-            "type": "n8n-nodes-base.xml",
-            "typeVersion": 1,
+            "id": "w3-upsert-sitemap",
+            "name": "Upsert Sitemap",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.6,
             "position": [
                 1500,
+                300
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "postgres-creds-id",
+                    "name": "Postgres account"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "jsCode": "// Parse sitemap XML and extract URLs\nconst xml = $input.item.json.data || $input.item.json.body || '';\nconst domain_id = $node['Sitemap Candidates'].json.domain_id;\nconst urls = [];\n\n// Simple regex extraction for <loc> tags\nconst locMatches = xml.match(/<loc>([^<]+)<\\/loc>/g) || [];\nfor (const match of locMatches) {\n  const url = match.replace('<loc>', '').replace('</loc>', '').trim();\n  if (url && url.startsWith('http')) {\n    urls.push({ domain_id, url });\n  }\n}\n\nreturn urls.slice(0, 100).map(u => ({ json: u }));"
+            },
+            "id": "w3-parse-sitemap",
+            "name": "Parse Sitemap",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1700,
                 300
             ]
         },
         {
             "parameters": {
-                "operation": "upsert",
-                "table": {
-                    "mode": "name",
-                    "value": "pages",
-                    "schema": "wellness"
-                },
-                "columnToTestOn": "url",
-                "valuesSend": "fields",
-                "fieldsToInsert": {
-                    "values": [
-                        {
-                            "column": "domain_id",
-                            "value": "={{$node[\"Split Domains\"].json[\"id\"]}}"
-                        },
-                        {
-                            "column": "url",
-                            "value": "={{$json[\"urlset\"] ? $json[\"urlset\"][\"url\"] : ($json[\"sitemapindex\"] ? $json[\"sitemapindex\"][\"sitemap\"] : [])}}"
-                        }
-                    ]
-                }
+                "operation": "executeQuery",
+                "query": "INSERT INTO wellness.pages (domain_id, url)\nVALUES ('{{ $json.domain_id }}'::uuid, '{{ $json.url }}')\nON CONFLICT (domain_id, url) DO UPDATE SET last_seen_at = NOW()\nRETURNING id;"
             },
-            "id": "7f0a0c21-7001-4444-aaaa-999999999999",
+            "id": "w3-upsert-pages",
             "name": "Upsert Pages",
             "type": "n8n-nodes-base.postgres",
             "typeVersion": 2.6,
             "position": [
-                1700,
+                1900,
+                300
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "postgres-creds-id",
+                    "name": "Postgres account"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "UPDATE wellness.domains SET discovery_state = 'complete' WHERE id = '{{ $node[\"Split Domains\"].json.domain_id }}'::uuid;"
+            },
+            "id": "w3-complete-domain",
+            "name": "Complete Domain",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.6,
+            "position": [
+                2100,
                 300
             ],
             "credentials": {
@@ -179,17 +193,6 @@
     ],
     "connections": {
         "Manual Trigger": {
-            "main": [
-                [
-                    {
-                        "node": "Claim Job",
-                        "type": "main",
-                        "index": 0
-                    }
-                ]
-            ]
-        },
-        "Claim Job": {
             "main": [
                 [
                     {
@@ -212,6 +215,17 @@
             ]
         },
         "Split Domains": {
+            "main": [
+                [
+                    {
+                        "node": "Lock Domain",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Lock Domain": {
             "main": [
                 [
                     {
@@ -248,14 +262,25 @@
             "main": [
                 [
                     {
-                        "node": "Parse XML",
+                        "node": "Upsert Sitemap",
                         "type": "main",
                         "index": 0
                     }
                 ]
             ]
         },
-        "Parse XML": {
+        "Upsert Sitemap": {
+            "main": [
+                [
+                    {
+                        "node": "Parse Sitemap",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Parse Sitemap": {
             "main": [
                 [
                     {
@@ -265,11 +290,21 @@
                     }
                 ]
             ]
+        },
+        "Upsert Pages": {
+            "main": [
+                [
+                    {
+                        "node": "Complete Domain",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
         }
     },
-    "settings": {},
-    "active": false,
-    "meta": {
-        "instanceId": "ami-local-instance"
-    }
+    "settings": {
+        "executionOrder": "v1"
+    },
+    "active": false
 }

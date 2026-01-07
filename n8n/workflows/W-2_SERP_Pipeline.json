@@ -3,7 +3,7 @@
     "nodes": [
         {
             "parameters": {},
-            "id": "7f0a0c21-7001-4444-9999-111111111111",
+            "id": "w2-trigger-1",
             "name": "Manual Trigger",
             "type": "n8n-nodes-base.manualTrigger",
             "typeVersion": 1,
@@ -15,10 +15,10 @@
         {
             "parameters": {
                 "operation": "executeQuery",
-                "query": "UPDATE wellness.jobs \nSET state = 'locked', \n    locked_at = NOW(), \n    locked_by = 'w2-worker', \n    locked_expires_at = NOW() + INTERVAL '30 minutes'\nWHERE id = (\n    SELECT id \n    FROM wellness.jobs \n    WHERE job_type = 'serp_mining' \n      AND state = 'available' \n      AND available_at <= NOW()\n    ORDER BY created_at ASC\n    LIMIT 1\n    FOR UPDATE SKIP LOCKED\n)\nRETURNING *;"
+                "query": "-- Get active queries to process (Tier A/B)\nSELECT sq.id, sq.vertical_id, sq.query_text, sq.geo, sq.intent_tag\nFROM wellness.search_queries sq\nWHERE sq.active = true\n  AND sq.priority_tier IN ('A', 'B')\n  AND NOT EXISTS (\n    SELECT 1 FROM wellness.serp_snapshots ss\n    WHERE ss.query_id = sq.id\n      AND ss.captured_at > NOW() - INTERVAL '24 hours'\n  )\nLIMIT 50;"
             },
-            "id": "7f0a0c21-7001-4444-9999-222222222222",
-            "name": "Claim Job",
+            "id": "w2-get-queries",
+            "name": "Get Queries",
             "type": "n8n-nodes-base.postgres",
             "typeVersion": 2.6,
             "position": [
@@ -34,67 +34,30 @@
         },
         {
             "parameters": {
-                "operation": "select",
-                "table": {
-                    "mode": "name",
-                    "value": "search_queries",
-                    "schema": "wellness"
-                },
-                "returnAll": true,
-                "whereColumns": {
-                    "values": [
-                        {
-                            "column": "active",
-                            "value": true
-                        },
-                        {
-                            "column": "priority_tier",
-                            "operator": "in",
-                            "value": "A,B"
-                        }
-                    ]
-                }
-            },
-            "id": "7f0a0c21-7001-4444-9999-333333333333",
-            "name": "Get Queries",
-            "type": "n8n-nodes-base.postgres",
-            "typeVersion": 2.6,
-            "position": [
-                500,
-                300
-            ],
-            "credentials": {
-                "postgres": {
-                    "id": "postgres-creds-id",
-                    "name": "Postgres account"
-                }
-            }
-        },
-        {
-            "parameters": {
                 "batchSize": 1,
                 "options": {}
             },
-            "id": "7f0a0c21-7001-4444-9999-444444444444",
+            "id": "w2-split",
             "name": "Split Queries",
             "type": "n8n-nodes-base.splitInBatches",
-            "typeVersion": 1,
+            "typeVersion": 3,
             "position": [
-                700,
+                500,
                 300
             ]
         },
         {
             "parameters": {
+                "method": "GET",
                 "url": "https://serpapi.com/search.json",
                 "authentication": "genericCredentialType",
                 "genericAuthType": "httpQueryAuth",
-                "options": {},
+                "sendQuery": true,
                 "queryParameters": {
                     "parameters": [
                         {
                             "name": "q",
-                            "value": "={{$node[\"Split Queries\"].json[\"query_text\"] + ($node[\"Split Queries\"].json[\"geo\"] ? \" \" + $node[\"Split Queries\"].json[\"geo\"] : \"\") + \" singapore\"}}"
+                            "value": "={{ $json.query_text }}"
                         },
                         {
                             "name": "engine",
@@ -117,14 +80,17 @@
                             "value": "en"
                         }
                     ]
+                },
+                "options": {
+                    "timeout": 30000
                 }
             },
-            "id": "7f0a0c21-7001-4444-9999-555555555555",
+            "id": "w2-serpapi",
             "name": "SerpAPI Call",
             "type": "n8n-nodes-base.httpRequest",
-            "typeVersion": 3,
+            "typeVersion": 4.2,
             "position": [
-                900,
+                700,
                 300
             ],
             "credentials": {
@@ -132,40 +98,20 @@
                     "id": "serpapi-creds-id",
                     "name": "SerpAPI Key"
                 }
-            }
+            },
+            "continueOnFail": true
         },
         {
             "parameters": {
-                "operation": "insert",
-                "table": {
-                    "mode": "name",
-                    "value": "serp_snapshots",
-                    "schema": "wellness"
-                },
-                "valuesSend": "fields",
-                "fieldsToInsert": {
-                    "values": [
-                        {
-                            "column": "query_id",
-                            "value": "={{$node[\"Split Queries\"].json[\"id\"]}}"
-                        },
-                        {
-                            "column": "raw_json",
-                            "value": "={{JSON.stringify($node[\"SerpAPI Call\"].json)}}"
-                        },
-                        {
-                            "column": "raw_hash",
-                            "value": "={{$node[\"SerpAPI Call\"].json.search_metadata.id}}"
-                        }
-                    ]
-                }
+                "operation": "executeQuery",
+                "query": "INSERT INTO wellness.serp_snapshots (query_id, raw_json, raw_hash)\nVALUES (\n  '{{ $node[\"Split Queries\"].json.id }}'::uuid,\n  '{{ JSON.stringify($json).replace(/'/g, \"''\") }}'::jsonb,\n  '{{ $json.search_metadata ? $json.search_metadata.id : \"unknown\" }}'\n)\nRETURNING id;"
             },
-            "id": "7f0a0c21-7001-4444-9999-666666666666",
+            "id": "w2-store-snapshot",
             "name": "Store Snapshot",
             "type": "n8n-nodes-base.postgres",
             "typeVersion": 2.6,
             "position": [
-                1100,
+                900,
                 300
             ],
             "credentials": {
@@ -177,38 +123,45 @@
         },
         {
             "parameters": {
-                "jsCode": "// Extract organic results and local pack\nconst snapshot = $node[\"SerpAPI Call\"].json;\nconst vertical_id = $node[\"Split Queries\"].json[\"vertical_id\"];\nconst snapshot_id = $node[\"Store Snapshot\"].json[\"id\"];\n\nconst results = [];\n\nif (snapshot.organic_results) {\n  snapshot.organic_results.forEach(r => {\n    const domain = new URL(r.link).hostname.replace('www.', '');\n    results.push({\n      snapshot_id,\n      rank_position: r.position,\n      block_type: 'organic',\n      title: r.title,\n      url: r.link,\n      domain,\n      snippet: r.snippet,\n      vertical_id\n    });\n  });\n}\n\nif (snapshot.local_results) {\n  snapshot.local_results.forEach(r => {\n    const domain = r.website ? new URL(r.website).hostname.replace('www.', '') : null;\n    results.push({\n      snapshot_id,\n      rank_position: r.position,\n      block_type: 'local_pack',\n      title: r.title,\n      url: r.website,\n      domain,\n      vertical_id\n    });\n  });\n}\n\nreturn results;"
+                "jsCode": "// Parse SERP results into structured rows\nconst serp = $node['SerpAPI Call'].json;\nconst snapshot_id = $node['Store Snapshot'].json.id;\nconst vertical_id = $node['Split Queries'].json.vertical_id;\nconst results = [];\n\n// Organic results\nif (serp.organic_results) {\n  for (const r of serp.organic_results) {\n    try {\n      const domain = new URL(r.link).hostname.replace('www.', '');\n      results.push({\n        snapshot_id,\n        rank_position: r.position,\n        block_type: 'organic',\n        title: r.title || '',\n        url: r.link,\n        domain,\n        snippet: r.snippet || '',\n        vertical_id\n      });\n    } catch (e) {}\n  }\n}\n\n// Local pack\nif (serp.local_results && serp.local_results.places) {\n  let pos = 1;\n  for (const r of serp.local_results.places) {\n    const domain = r.website ? new URL(r.website).hostname.replace('www.', '') : null;\n    results.push({\n      snapshot_id,\n      rank_position: pos++,\n      block_type: 'local_pack',\n      title: r.title || '',\n      url: r.website || '',\n      domain,\n      snippet: r.address || '',\n      vertical_id\n    });\n  }\n}\n\nreturn results.map(r => ({ json: r }));"
             },
-            "id": "7f0a0c21-7001-4444-9999-777777777777",
+            "id": "w2-parse-results",
             "name": "Parse Results",
             "type": "n8n-nodes-base.code",
-            "typeVersion": 1,
+            "typeVersion": 2,
             "position": [
-                1300,
+                1100,
                 300
             ]
         },
         {
             "parameters": {
-                "operation": "upsert",
-                "table": {
-                    "mode": "name",
-                    "value": "domains",
-                    "schema": "wellness"
-                },
-                "columnToTestOn": "domain",
-                "valuesSend": "fields",
-                "fieldsToInsert": {
-                    "values": [
-                        {
-                            "column": "domain",
-                            "value": "={{$json[\"domain\"]}}"
-                        }
-                    ]
+                "operation": "executeQuery",
+                "query": "-- Upsert domain first\nINSERT INTO wellness.domains (domain, discovery_state)\nVALUES ('{{ $json.domain }}', 'pending')\nON CONFLICT (domain) DO UPDATE SET domain = EXCLUDED.domain\nRETURNING id;"
+            },
+            "id": "w2-upsert-domain",
+            "name": "Upsert Domain",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.6,
+            "position": [
+                1300,
+                300
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "postgres-creds-id",
+                    "name": "Postgres account"
                 }
             },
-            "id": "7f0a0c21-7001-4444-9999-888888888888",
-            "name": "Upsert Domains",
+            "continueOnFail": true
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "INSERT INTO wellness.serp_results (snapshot_id, rank_position, block_type, title, url, domain_id, snippet)\nVALUES (\n  '{{ $node[\"Parse Results\"].json.snapshot_id }}'::uuid,\n  {{ $node[\"Parse Results\"].json.rank_position }},\n  '{{ $node[\"Parse Results\"].json.block_type }}',\n  '{{ ($node[\"Parse Results\"].json.title || \"\").replace(/'/g, \"''\") }}',\n  '{{ $node[\"Parse Results\"].json.url }}',\n  '{{ $json.id }}'::uuid,\n  '{{ ($node[\"Parse Results\"].json.snippet || \"\").replace(/'/g, \"''\") }}'\n)\nON CONFLICT (snapshot_id, rank_position, block_type) DO NOTHING\nRETURNING id;"
+            },
+            "id": "w2-insert-result",
+            "name": "Insert Result",
             "type": "n8n-nodes-base.postgres",
             "typeVersion": 2.6,
             "position": [
@@ -221,21 +174,31 @@
                     "name": "Postgres account"
                 }
             }
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "-- Seed clinic if we have a new domain\nINSERT INTO wellness.clinics (name, vertical_id)\nSELECT '{{ ($node[\"Parse Results\"].json.title || \"\").replace(/'/g, \"''\") }}', '{{ $node[\"Parse Results\"].json.vertical_id }}'::uuid\nWHERE NOT EXISTS (\n  SELECT 1 FROM wellness.domains d\n  JOIN wellness.clinics c ON d.clinic_id = c.id\n  WHERE d.id = '{{ $json.id }}'::uuid AND d.clinic_id IS NOT NULL\n)\nRETURNING id;"
+            },
+            "id": "w2-seed-clinic",
+            "name": "Seed Clinic",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.6,
+            "position": [
+                1700,
+                300
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "postgres-creds-id",
+                    "name": "Postgres account"
+                }
+            },
+            "continueOnFail": true
         }
     ],
     "connections": {
         "Manual Trigger": {
-            "main": [
-                [
-                    {
-                        "node": "Claim Job",
-                        "type": "main",
-                        "index": 0
-                    }
-                ]
-            ]
-        },
-        "Claim Job": {
             "main": [
                 [
                     {
@@ -294,7 +257,29 @@
             "main": [
                 [
                     {
-                        "node": "Upsert Domains",
+                        "node": "Upsert Domain",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Upsert Domain": {
+            "main": [
+                [
+                    {
+                        "node": "Insert Result",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Insert Result": {
+            "main": [
+                [
+                    {
+                        "node": "Seed Clinic",
                         "type": "main",
                         "index": 0
                     }
@@ -302,9 +287,8 @@
             ]
         }
     },
-    "settings": {},
-    "active": false,
-    "meta": {
-        "instanceId": "ami-local-instance"
-    }
+    "settings": {
+        "executionOrder": "v1"
+    },
+    "active": false
 }
