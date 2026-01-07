@@ -304,7 +304,13 @@
                         "index": 0
                     }
                 ],
-                []
+                [
+                    {
+                        "node": "Split Queries",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
             ]
         },
         "Upsert Domain": {
@@ -323,6 +329,17 @@
                 [
                     {
                         "node": "Insert Result",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Insert Result": {
+            "main": [
+                [
+                    {
+                        "node": "Split Queries",
                         "type": "main",
                         "index": 0
                     }
