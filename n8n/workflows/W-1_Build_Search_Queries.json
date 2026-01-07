@@ -15,7 +15,7 @@
         {
             "parameters": {
                 "operation": "executeQuery",
-                "query": "-- Read seed data for query generation\nSELECT \n  v.id as vertical_id,\n  v.name as vertical_name,\n  s.service_name,\n  t.template,\n  t.intent_tag,\n  g.modifiers as geo_modifiers\nFROM wellness.verticals v\nCROSS JOIN wellness.services s ON s.vertical_id = v.id\nCROSS JOIN wellness.search_query_templates t\nCROSS JOIN wellness.geo_sets g\nLIMIT 1000;"
+                "query": "-- Read seed data for query generation\nSELECT \n  v.id as vertical_id,\n  v.name as vertical_name,\n  s.service_name,\n  t.template,\n  t.intent_tag,\n  g.modifiers as geo_modifiers\nFROM wellness.verticals v\nJOIN wellness.services s ON s.vertical_id = v.id\nCROSS JOIN wellness.search_query_templates t\nCROSS JOIN wellness.geo_sets g\nLIMIT 1000;"
             },
             "id": "w1-read-seeds",
             "name": "Read Seeds",
