@@ -15,7 +15,7 @@
         {
             "parameters": {
                 "operation": "executeQuery",
-                "query": "-- Get active queries to process (Tier A/B)\nSELECT sq.id, sq.vertical_id, sq.query_text, sq.geo, sq.intent_tag\nFROM wellness.search_queries sq\nWHERE sq.active = true\n  AND sq.priority_tier IN ('A', 'B')\n  AND NOT EXISTS (\n    SELECT 1 FROM wellness.serp_snapshots ss\n    WHERE ss.query_id = sq.id\n      AND ss.captured_at > NOW() - INTERVAL '24 hours'\n  )\nLIMIT 50;"
+                "query": "SELECT sq.id, sq.vertical_id, sq.query_text, sq.geo, sq.intent_tag\nFROM wellness.search_queries sq\nWHERE sq.active = true\n  AND sq.priority_tier IN ('A', 'B')\n  AND NOT EXISTS (\n    SELECT 1 FROM wellness.serp_snapshots ss\n    WHERE ss.query_id = sq.id\n      AND ss.captured_at > NOW() - INTERVAL '24 hours'\n  )\nLIMIT 50;"
             },
             "id": "w2-get-queries",
             "name": "Get Queries",
@@ -48,21 +48,8 @@
         },
         {
             "parameters": {
-                "jsCode": "// Store original query data for later use\nconst query = $input.item.json;\nreturn [{ json: { ...query, _query_id: query.id, _vertical_id: query.vertical_id, _geo: query.geo } }];"
-            },
-            "id": "w2-store-query-context",
-            "name": "Store Query Context",
-            "type": "n8n-nodes-base.code",
-            "typeVersion": 2,
-            "position": [
-                600,
-                300
-            ]
-        },
-        {
-            "parameters": {
                 "engine": "google",
-                "q": "={{ $json.query_text + ($json._geo ? ' ' + $json._geo : '') + ' singapore' }}",
+                "q": "={{ $json.query_text + ($json.geo ? ' ' + $json.geo : '') + ' singapore' }}",
                 "location": "Singapore",
                 "google_domain": "google.com.sg",
                 "gl": "sg",
@@ -74,7 +61,7 @@
             "type": "n8n-nodes-base.serpApi",
             "typeVersion": 1,
             "position": [
-                800,
+                700,
                 300
             ],
             "credentials": {
@@ -87,14 +74,14 @@
         },
         {
             "parameters": {
-                "jsCode": "// Merge query context with SERP response\nconst serp = $input.item.json;\nconst queryContext = $node['Store Query Context'].json;\nreturn [{ json: { ...serp, _query_id: queryContext._query_id, _vertical_id: queryContext._vertical_id, _geo: queryContext._geo } }];"
+                "jsCode": "// Get query context from Split Queries\nconst query = $node['Split Queries'].json;\nconst serp = $input.item.json;\n\n// Merge for downstream use\nreturn [{ json: {\n  ...serp,\n  _query_id: query.id,\n  _vertical_id: query.vertical_id,\n  _geo: query.geo\n}}];"
             },
-            "id": "w2-merge-context",
-            "name": "Merge Context",
+            "id": "w2-enrich-serp",
+            "name": "Enrich SERP",
             "type": "n8n-nodes-base.code",
             "typeVersion": 2,
             "position": [
-                1000,
+                900,
                 300
             ]
         },
@@ -108,7 +95,7 @@
             "type": "n8n-nodes-base.postgres",
             "typeVersion": 2.6,
             "position": [
-                1200,
+                1100,
                 300
             ],
             "credentials": {
@@ -120,14 +107,14 @@
         },
         {
             "parameters": {
-                "jsCode": "// Parse SERP results into structured rows\nconst serp = $node['Merge Context'].json;\nconst snapshot_id = $input.item.json.id; // From Store Snapshot RETURNING\nconst vertical_id = serp._vertical_id;\nconst results = [];\n\n// Organic results\nif (serp.organic_results) {\n  for (const r of serp.organic_results) {\n    try {\n      const domain = new URL(r.link).hostname.replace('www.', '');\n      results.push({\n        snapshot_id,\n        rank_position: r.position,\n        block_type: 'organic',\n        title: r.title || '',\n        url: r.link,\n        domain,\n        snippet: r.snippet || '',\n        vertical_id\n      });\n    } catch (e) {}\n  }\n}\n\n// Local pack\nif (serp.local_results && serp.local_results.places) {\n  let pos = 1;\n  for (const r of serp.local_results.places) {\n    let domain = null;\n    if (r.website) {\n      try { domain = new URL(r.website).hostname.replace('www.', ''); } catch(e) {}\n    }\n    results.push({\n      snapshot_id,\n      rank_position: pos++,\n      block_type: 'local_pack',\n      title: r.title || '',\n      url: r.website || '',\n      domain,\n      snippet: r.address || '',\n      vertical_id\n    });\n  }\n}\n\nif (results.length === 0) {\n  return [{ json: { _skip: true, snapshot_id } }];\n}\n\nreturn results.map(r => ({ json: r }));"
+                "jsCode": "// Parse SERP results into structured rows - ALL DATA IN ONE PLACE\nconst enrichedSerp = $node['Enrich SERP'].json;\nconst snapshot_id = $input.item.json.id;\nconst vertical_id = enrichedSerp._vertical_id;\nconst results = [];\n\n// Organic results\nif (enrichedSerp.organic_results) {\n  for (const r of enrichedSerp.organic_results) {\n    try {\n      const domain = new URL(r.link).hostname.replace('www.', '');\n      results.push({\n        snapshot_id,\n        rank_position: r.position || 0,\n        block_type: 'organic',\n        title: (r.title || '').substring(0, 500),\n        url: r.link || '',\n        domain,\n        snippet: (r.snippet || '').substring(0, 1000),\n        vertical_id\n      });\n    } catch (e) {}\n  }\n}\n\n// Local pack\nif (enrichedSerp.local_results && enrichedSerp.local_results.places) {\n  let pos = 1;\n  for (const r of enrichedSerp.local_results.places) {\n    let domain = null;\n    if (r.website) {\n      try { domain = new URL(r.website).hostname.replace('www.', ''); } catch(e) {}\n    }\n    if (domain) {\n      results.push({\n        snapshot_id,\n        rank_position: pos,\n        block_type: 'local_pack',\n        title: (r.title || '').substring(0, 500),\n        url: r.website || '',\n        domain,\n        snippet: (r.address || '').substring(0, 1000),\n        vertical_id\n      });\n    }\n    pos++;\n  }\n}\n\nif (results.length === 0) {\n  return [{ json: { _skip: true } }];\n}\n\nreturn results.map(r => ({ json: r }));"
             },
             "id": "w2-parse-results",
             "name": "Parse Results",
             "type": "n8n-nodes-base.code",
             "typeVersion": 2,
             "position": [
-                1400,
+                1300,
                 300
             ]
         },
@@ -136,7 +123,7 @@
                 "conditions": {
                     "boolean": [
                         {
-                            "value1": "={{ $json._skip !== true && $json.domain !== null }}",
+                            "value1": "={{ $json._skip !== true && $json.domain }}",
                             "value2": true
                         }
                     ]
@@ -147,30 +134,30 @@
             "type": "n8n-nodes-base.if",
             "typeVersion": 2,
             "position": [
-                1600,
+                1500,
                 300
             ]
         },
         {
             "parameters": {
-                "jsCode": "// Store current item data before DB call\nconst item = $input.item.json;\nreturn [{ json: { _parseData: item } }];"
+                "jsCode": "// Upsert domain and insert result in one consolidated step\nconst item = $input.item.json;\n\n// Return all data needed for the next steps\nreturn [{ json: {\n  snapshot_id: item.snapshot_id,\n  rank_position: item.rank_position,\n  block_type: item.block_type,\n  title: item.title,\n  url: item.url,\n  domain: item.domain,\n  snippet: item.snippet,\n  vertical_id: item.vertical_id\n}}];"
             },
-            "id": "w2-store-parse-data",
-            "name": "Store Parse Data",
+            "id": "w2-prepare-insert",
+            "name": "Prepare Insert",
             "type": "n8n-nodes-base.code",
             "typeVersion": 2,
             "position": [
-                1750,
+                1700,
                 250
             ]
         },
         {
             "parameters": {
                 "operation": "executeQuery",
-                "query": "INSERT INTO wellness.domains (domain, discovery_state)\nVALUES ('{{ $node['Store Parse Data'].json._parseData.domain }}', 'pending')\nON CONFLICT (domain) DO UPDATE SET domain = EXCLUDED.domain\nRETURNING id;"
+                "query": "WITH domain_upsert AS (\n  INSERT INTO wellness.domains (domain, discovery_state)\n  VALUES ('{{ $json.domain }}', 'pending')\n  ON CONFLICT (domain) DO UPDATE SET domain = EXCLUDED.domain\n  RETURNING id\n)\nINSERT INTO wellness.serp_results (snapshot_id, rank_position, block_type, title, url, domain_id, snippet)\nSELECT\n  '{{ $json.snapshot_id }}'::uuid,\n  {{ $json.rank_position }},\n  '{{ $json.block_type }}',\n  '{{ ($json.title || '').replace(/'/g, \"''\") }}',\n  '{{ $json.url }}',\n  domain_upsert.id,\n  '{{ ($json.snippet || '').replace(/'/g, \"''\") }}'\nFROM domain_upsert\nON CONFLICT (snapshot_id, rank_position, block_type) DO NOTHING\nRETURNING id;"
             },
-            "id": "w2-upsert-domain",
-            "name": "Upsert Domain",
+            "id": "w2-insert-all",
+            "name": "Upsert Domain & Insert Result",
             "type": "n8n-nodes-base.postgres",
             "typeVersion": 2.6,
             "position": [
@@ -186,37 +173,15 @@
             "continueOnFail": true
         },
         {
-            "parameters": {
-                "jsCode": "// Merge domain_id back with stored parse data\nconst domainResult = $input.item.json;\nconst parseData = $node['Store Parse Data'].json._parseData;\nreturn [{ json: { ...parseData, domain_id: domainResult.id } }];"
-            },
-            "id": "w2-merge-domain-id",
-            "name": "Merge Domain ID",
-            "type": "n8n-nodes-base.code",
-            "typeVersion": 2,
+            "parameters": {},
+            "id": "w2-noop",
+            "name": "NoOp",
+            "type": "n8n-nodes-base.noOp",
+            "typeVersion": 1,
             "position": [
                 2100,
                 250
             ]
-        },
-        {
-            "parameters": {
-                "operation": "executeQuery",
-                "query": "INSERT INTO wellness.serp_results (snapshot_id, rank_position, block_type, title, url, domain_id, snippet)\nVALUES (\n  '{{ $json.snapshot_id }}'::uuid,\n  {{ $json.rank_position }},\n  '{{ $json.block_type }}',\n  '{{ ($json.title || \"\").replace(/'/g, \"''\") }}',\n  '{{ $json.url }}',\n  '{{ $json.domain_id }}'::uuid,\n  '{{ ($json.snippet || \"\").replace(/'/g, \"''\") }}'\n)\nON CONFLICT (snapshot_id, rank_position, block_type) DO NOTHING\nRETURNING id;"
-            },
-            "id": "w2-insert-result",
-            "name": "Insert Result",
-            "type": "n8n-nodes-base.postgres",
-            "typeVersion": 2.6,
-            "position": [
-                2200,
-                250
-            ],
-            "credentials": {
-                "postgres": {
-                    "id": "postgres-creds-id",
-                    "name": "Postgres account"
-                }
-            }
         }
     ],
     "connections": {
@@ -246,17 +211,6 @@
             "main": [
                 [
                     {
-                        "node": "Store Query Context",
-                        "type": "main",
-                        "index": 0
-                    }
-                ]
-            ]
-        },
-        "Store Query Context": {
-            "main": [
-                [
-                    {
                         "node": "SerpApi Node",
                         "type": "main",
                         "index": 0
@@ -268,14 +222,14 @@
             "main": [
                 [
                     {
-                        "node": "Merge Context",
+                        "node": "Enrich SERP",
                         "type": "main",
                         "index": 0
                     }
                 ]
             ]
         },
-        "Merge Context": {
+        "Enrich SERP": {
             "main": [
                 [
                     {
@@ -312,7 +266,7 @@
             "main": [
                 [
                     {
-                        "node": "Store Parse Data",
+                        "node": "Prepare Insert",
                         "type": "main",
                         "index": 0
                     }
@@ -326,40 +280,29 @@
                 ]
             ]
         },
-        "Store Parse Data": {
+        "Prepare Insert": {
             "main": [
                 [
                     {
-                        "node": "Upsert Domain",
+                        "node": "Upsert Domain & Insert Result",
                         "type": "main",
                         "index": 0
                     }
                 ]
             ]
         },
-        "Upsert Domain": {
+        "Upsert Domain & Insert Result": {
             "main": [
                 [
                     {
-                        "node": "Merge Domain ID",
+                        "node": "NoOp",
                         "type": "main",
                         "index": 0
                     }
                 ]
             ]
         },
-        "Merge Domain ID": {
-            "main": [
-                [
-                    {
-                        "node": "Insert Result",
-                        "type": "main",
-                        "index": 0
-                    }
-                ]
-            ]
-        },
-        "Insert Result": {
+        "NoOp": {
             "main": [
                 [
                     {
