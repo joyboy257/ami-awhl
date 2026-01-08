@@ -178,7 +178,7 @@
         },
         {
             "parameters": {
-                "jsCode": "// Get domain for completion\nconst item = $input.item.json;\nreturn [{ json: { domain: item.domain || '' } }];"
+                "jsCode": "// Get domain for completion - use first() for Run Once mode\nconst items = $input.all();\nif (items.length === 0) return [{ json: { domain: '' } }];\nconst item = items[0].json;\nreturn [{ json: { domain: item.domain || '' } }];"
             },
             "id": "w3-prep-complete",
             "name": "Prep Complete",
