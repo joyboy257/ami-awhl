@@ -95,7 +95,7 @@
         },
         {
             "parameters": {
-                "jsCode": "// Merge Serper response with query context from Build Request\nconst serp = $input.item.json;\nconst buildReq = $node['Build Request'].json;\nconst hash = (serp.searchParameters && serp.searchParameters.q) || 'unknown-' + Date.now();\nreturn [{ json: {\n  query_id: buildReq.query_id,\n  vertical_id: buildReq.vertical_id,\n  _hash: hash,\n  organic: serp.organic || [],\n  places: serp.places || []\n}}];"
+                "jsCode": "// Merge Serper response with query context from Build Request\nconst serp = $input.item.json;\nconst buildReq = $node['Build Request'].json;\nconst hash = (serp.searchParameters && serp.searchParameters.q) || 'unknown-' + Date.now();\n// Stringify for raw_json storage - escape single quotes for SQL\nconst rawJson = JSON.stringify(serp).replace(/'/g, \"''\");\nreturn [{ json: {\n  query_id: buildReq.query_id,\n  vertical_id: buildReq.vertical_id,\n  _hash: hash,\n  _rawJson: rawJson,\n  organic: serp.organic || [],\n  places: serp.places || []\n}}];"
             },
             "id": "w2-merge-serp",
             "name": "Merge SERP Context",
@@ -109,7 +109,7 @@
         {
             "parameters": {
                 "operation": "executeQuery",
-                "query": "INSERT INTO wellness.serp_snapshots (query_id, raw_hash) VALUES ('{{ $json.query_id }}'::uuid, '{{ $json._hash }}') RETURNING id as snapshot_id, query_id, '{{ $json.vertical_id }}' as vertical_id;"
+                "query": "INSERT INTO wellness.serp_snapshots (query_id, raw_json, raw_hash) VALUES ('{{ $json.query_id }}'::uuid, '{{ $json._rawJson }}'::jsonb, '{{ $json._hash }}') RETURNING id as snapshot_id, query_id, '{{ $json.vertical_id }}' as vertical_id;"
             },
             "id": "w2-store-snapshot",
             "name": "Store Snapshot",
