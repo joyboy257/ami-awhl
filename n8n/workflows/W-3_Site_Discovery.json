@@ -158,7 +158,7 @@
         {
             "parameters": {
                 "operation": "executeQuery",
-                "query": "INSERT INTO wellness.pages (domain_id, url)\nSELECT d.id, '{{ $json.url }}'\nFROM wellness.domains d WHERE d.domain = '{{ $json.domain }}'\nON CONFLICT (domain_id, url) DO UPDATE SET last_seen_at = NOW();"
+                "query": "WITH ins AS (\n  INSERT INTO wellness.pages (domain_id, url)\n  SELECT d.id, '{{ $json.url }}'\n  FROM wellness.domains d WHERE d.domain = '{{ $json.domain }}'\n  ON CONFLICT (domain_id, url) DO UPDATE SET last_seen_at = NOW()\n  RETURNING domain_id\n)\nSELECT d.domain FROM ins JOIN wellness.domains d ON d.id = ins.domain_id;"
             },
             "id": "w3-upsert",
             "name": "Upsert Pages",
