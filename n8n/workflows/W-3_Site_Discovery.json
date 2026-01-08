@@ -48,9 +48,9 @@
         },
         {
             "parameters": {
-                "jsCode": "// Prepare domain context and build sitemap URL\n// Process one sitemap URL per domain (simplest approach)\nconst d = $input.item.json;\nconst domain = d.domain;\nconst domain_id = d.domain_id;\nconst sitemapUrl = 'https://' + domain + '/sitemap.xml';\n\nreturn [{ json: { domain_id, domain, sitemap_url: sitemapUrl } }];"
+                "jsCode": "// Prepare domain context - keep domain_id and domain for later\nconst d = $input.item.json;\nreturn [{ json: { \n  domain_id: d.domain_id, \n  domain: d.domain, \n  sitemap_url: 'https://' + d.domain + '/sitemap.xml' \n}}];"
             },
-            "id": "w3-prep-domain",
+            "id": "w3-prep",
             "name": "Prep Domain",
             "type": "n8n-nodes-base.code",
             "typeVersion": 2,
@@ -64,7 +64,7 @@
                 "operation": "executeQuery",
                 "query": "UPDATE wellness.domains SET discovery_state = 'in_progress' WHERE id = '{{ $json.domain_id }}'::uuid;"
             },
-            "id": "w3-lock-domain",
+            "id": "w3-lock",
             "name": "Lock Domain",
             "type": "n8n-nodes-base.postgres",
             "typeVersion": 2.6,
@@ -81,9 +81,9 @@
         },
         {
             "parameters": {
-                "jsCode": "// Pass domain context through (Lock Domain returns nothing useful)\nconst prev = $input.item.json;\nreturn [{ json: { domain_id: prev.domain_id, domain: prev.domain, sitemap_url: prev.sitemap_url } }];"
+                "jsCode": "// Restore domain context after Lock (which returns nothing useful)\n// We need to get back our domain_id, domain, sitemap_url from Prep Domain\n// Since we can't use $node refs, we'll get it from the execution context\n// Workaround: Pass through from input - Lock Domain receives data from Prep Domain\nconst prev = $input.item.json;\n// After DB update, $input.item.json has the Lock result (empty or just confirmation)\n// We need to reconstruct - get from Prep Domain output which was passed to Lock\n// Since we're in a chain: Prep -> Lock -> this node, prev has Lock output\n// Solution: Store in a way that survives the DB node\n// Actually Lock receives {domain_id, domain, sitemap_url} and passes it through\nreturn [{ json: prev }];"
             },
-            "id": "w3-restore-context-1",
+            "id": "w3-restore",
             "name": "Restore Context",
             "type": "n8n-nodes-base.code",
             "typeVersion": 2,
@@ -99,7 +99,7 @@
                     "timeout": 20000
                 }
             },
-            "id": "w3-fetch-sitemap",
+            "id": "w3-fetch",
             "name": "Fetch Sitemap",
             "type": "n8n-nodes-base.httpRequest",
             "typeVersion": 4.2,
@@ -111,10 +111,10 @@
         },
         {
             "parameters": {
-                "jsCode": "// Extract XML and parse URLs - ALL IN ONE NODE\nconst resp = $input.item.json;\n\n// Get domain context from upstream - we need to handle where it might come from\n// Since HTTP replaces data, we need to reconstruct from context\nconst allItems = $input.all();\nconst prevContext = allItems.length > 1 ? allItems[0].json : {};\n\n// For single item flow, prev context is lost - we'll get it from the current execution\n// The workaround: restore context node output was consumed by HTTP request\n// Solution: We'll extract domain from the sitemap URL\nlet sitemapUrl = '';\nlet domain = '';\nlet domain_id = resp.domain_id;\n\nif (resp.sitemap_url) {\n  sitemapUrl = resp.sitemap_url;\n} else if (resp.url) {\n  sitemapUrl = resp.url;\n}\n\n// Try to get domain from URL\nif (sitemapUrl) {\n  try {\n    domain = new URL(sitemapUrl).hostname;\n  } catch(e) {}\n}\n\n// Extract XML content\nlet xml = '';\nif (typeof resp === 'string') {\n  xml = resp;\n} else if (resp.data) {\n  xml = resp.data;\n} else if (resp.body) {\n  xml = resp.body;\n}\n\n// Parse sitemap\nconst urls = [];\nif (xml && typeof xml === 'string' && xml.length > 50) {\n  const locMatches = xml.match(/<loc>([^<]+)<\\/loc>/g) || [];\n  for (const match of locMatches) {\n    const url = match.replace('<loc>', '').replace('</loc>', '').trim();\n    if (url && url.startsWith('http')) {\n      // Extract domain from page URL if we don't have it\n      let pageDomain = domain;\n      if (!pageDomain) {\n        try { pageDomain = new URL(url).hostname; } catch(e) {}\n      }\n      urls.push({ url, domain: pageDomain });\n    }\n  }\n}\n\nif (urls.length === 0) {\n  // No URLs found - mark as skip but we still need to complete\n  return [{ json: { _skip: true, domain, _reason: 'no_urls' } }];\n}\n\n// Return first 50 URLs with domain\nreturn urls.slice(0, 50).map(u => ({ json: u }));"
+                "jsCode": "// After HTTP fetch, we lose domain context\n// We need to extract domain from sitemap URL in the response or use a workaround\n// The HTTP response replaces our data - we need to get domain from the URL itself\nconst resp = $input.item.json;\n\n// Try to get sitemap URL from response headers or reconstruct\nlet domain = '';\nlet domain_id = '';\n\n// The only way: extract from response URL if available\nif (resp.url) {\n  const match = resp.url.match(/^https?:\\/\\/(?:www\\.)?([^\\/:]+)/i);\n  if (match) domain = match[1].toLowerCase();\n}\n\n// Get XML content\nlet xml = '';\nif (typeof resp === 'string') xml = resp;\nelse if (resp.data) xml = resp.data;\nelse if (resp.body) xml = resp.body;\n\n// We need domain_id - lookup from DB would be needed\n// For now, we'll use domain to lookup later\nreturn [{ json: { domain, _xml: xml, _needsDomainId: true } }];"
             },
-            "id": "w3-parse-all",
-            "name": "Parse and Extract",
+            "id": "w3-merge",
+            "name": "Merge Fetch",
             "type": "n8n-nodes-base.code",
             "typeVersion": 2,
             "position": [
@@ -124,10 +124,23 @@
         },
         {
             "parameters": {
+                "jsCode": "// Parse sitemap XML and extract URLs\nconst data = $input.item.json;\nconst xml = data._xml || '';\nconst domain = data.domain;\n\nconst urls = [];\nif (xml && typeof xml === 'string' && xml.length > 50) {\n  const cleanXml = xml.replace(/<!\\[CDATA\\[/g, '').replace(/\\]\\]>/g, '');\n  const locMatches = cleanXml.match(/<loc>([^<]+)<\\/loc>/g) || [];\n  \n  for (const match of locMatches) {\n    const url = match.replace('<loc>', '').replace('</loc>', '').trim();\n    if (url && url.startsWith('http')) {\n      urls.push({ url, domain });\n    }\n  }\n}\n\nif (urls.length === 0) {\n  return [{ json: { _skip: true, domain } }];\n}\n\nreturn urls.slice(0, 100).map(u => ({ json: u }));"
+            },
+            "id": "w3-parse",
+            "name": "Parse Sitemap",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1600,
+                300
+            ]
+        },
+        {
+            "parameters": {
                 "conditions": {
                     "boolean": [
                         {
-                            "value1": "={{ $json._skip !== true && $json.url && $json.domain }}",
+                            "value1": "={{ $json._skip !== true && $json.url }}",
                             "value2": true
                         }
                     ]
@@ -138,34 +151,21 @@
             "type": "n8n-nodes-base.if",
             "typeVersion": 2,
             "position": [
-                1600,
+                1800,
                 300
             ]
         },
         {
             "parameters": {
-                "jsCode": "// Lookup domain_id from domain name\nconst item = $input.item.json;\nreturn [{ json: { url: item.url, domain: item.domain } }];"
-            },
-            "id": "w3-prep-insert",
-            "name": "Prep Insert",
-            "type": "n8n-nodes-base.code",
-            "typeVersion": 2,
-            "position": [
-                1750,
-                250
-            ]
-        },
-        {
-            "parameters": {
                 "operation": "executeQuery",
-                "query": "INSERT INTO wellness.pages (domain_id, url)\nSELECT d.id, '{{ $json.url }}'\nFROM wellness.domains d\nWHERE d.domain = '{{ $json.domain }}'\nON CONFLICT (domain_id, url) DO UPDATE SET last_seen_at = NOW();"
+                "query": "INSERT INTO wellness.pages (domain_id, url)\nSELECT d.id, '{{ $json.url }}'\nFROM wellness.domains d WHERE d.domain = '{{ $json.domain }}'\nON CONFLICT (domain_id, url) DO UPDATE SET last_seen_at = NOW();"
             },
-            "id": "w3-upsert-pages",
+            "id": "w3-upsert",
             "name": "Upsert Pages",
             "type": "n8n-nodes-base.postgres",
             "typeVersion": 2.6,
             "position": [
-                1900,
+                2000,
                 250
             ],
             "credentials": {
@@ -178,14 +178,14 @@
         },
         {
             "parameters": {
-                "jsCode": "// Get domain for completion\nconst item = $input.item.json;\nconst domain = item.domain || '';\nreturn [{ json: { domain } }];"
+                "jsCode": "// Get domain for completion\nconst item = $input.item.json;\nreturn [{ json: { domain: item.domain || '' } }];"
             },
             "id": "w3-prep-complete",
             "name": "Prep Complete",
             "type": "n8n-nodes-base.code",
             "typeVersion": 2,
             "position": [
-                2050,
+                2200,
                 300
             ]
         },
@@ -199,7 +199,7 @@
             "type": "n8n-nodes-base.postgres",
             "typeVersion": 2.6,
             "position": [
-                2200,
+                2400,
                 300
             ],
             "credentials": {
@@ -281,14 +281,25 @@
             "main": [
                 [
                     {
-                        "node": "Parse and Extract",
+                        "node": "Merge Fetch",
                         "type": "main",
                         "index": 0
                     }
                 ]
             ]
         },
-        "Parse and Extract": {
+        "Merge Fetch": {
+            "main": [
+                [
+                    {
+                        "node": "Parse Sitemap",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Parse Sitemap": {
             "main": [
                 [
                     {
@@ -303,7 +314,7 @@
             "main": [
                 [
                     {
-                        "node": "Prep Insert",
+                        "node": "Upsert Pages",
                         "type": "main",
                         "index": 0
                     }
@@ -311,17 +322,6 @@
                 [
                     {
                         "node": "Prep Complete",
-                        "type": "main",
-                        "index": 0
-                    }
-                ]
-            ]
-        },
-        "Prep Insert": {
-            "main": [
-                [
-                    {
-                        "node": "Upsert Pages",
                         "type": "main",
                         "index": 0
                     }
