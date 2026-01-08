@@ -62,7 +62,7 @@
         {
             "parameters": {
                 "operation": "executeQuery",
-                "query": "UPDATE wellness.domains SET discovery_state = 'in_progress' WHERE id = '{{ $json.domain_id }}'::uuid;"
+                "query": "UPDATE wellness.domains d SET discovery_state = 'in_progress' WHERE d.id = '{{ $json.domain_id }}'::uuid RETURNING d.id as domain_id, d.domain, 'https://' || d.domain || '/sitemap.xml' as sitemap_url;"
             },
             "id": "w3-lock",
             "name": "Lock Domain",
