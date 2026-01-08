@@ -42,9 +42,9 @@ This is the granular task checklist for the AMI implementation. Update status as
 
 
 ### 2.2 Verification (Phase 2)
-- [ ] T-206: Run W1 for all 4 verticals, verify `search_queries` populated
-- [ ] T-207: Run W2 for Tier A queries, verify `serp_snapshots`, `serp_results`, `domains`, `clinics`
-- [ ] T-208: Run W3 for seeded domains, verify `sitemaps`, `pages` populated
+- [x] T-206: Run W1 for all 4 verticals, verify `search_queries` populated
+- [x] T-207: Run W2 for Tier A queries, verify `serp_snapshots`, `serp_results`, `domains`, `clinics`
+- [x] T-208: Run W3 for seeded domains, verify `sitemaps`, `pages` populated
 - [ ] T-209: Rerun W1-W3, verify idempotency (no duplicate rows)
 
 ---
