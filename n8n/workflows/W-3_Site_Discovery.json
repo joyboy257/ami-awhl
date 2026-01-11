@@ -1,5 +1,5 @@
 {
-    "name": "W-3: Site Discovery",
+    "name": "W-3: Site Discovery (Hardened)",
     "nodes": [
         {
             "parameters": {},
@@ -15,7 +15,7 @@
         {
             "parameters": {
                 "operation": "executeQuery",
-                "query": "SELECT d.id as domain_id, d.domain\nFROM wellness.domains d\nWHERE d.discovery_state = 'pending'\n  AND d.domain IS NOT NULL AND d.domain != '' AND length(d.domain) >= 4\nLIMIT 20;"
+                "query": "-- W-3 responsibility: Discovery quality (real URL yield), NOT body classification\n-- Select domains with pending discovery or zero pages\nSELECT d.id as domain_id, d.domain\nFROM wellness.domains d\nWHERE (d.discovery_state = 'pending' \n       OR (d.discovery_state = 'complete' AND NOT EXISTS (SELECT 1 FROM wellness.pages p WHERE p.domain_id = d.id)))\n  AND d.domain IS NOT NULL AND d.domain != '' AND length(d.domain) >= 4\nLIMIT 20;"
             },
             "id": "w3-get-domains",
             "name": "Get Domains",
@@ -48,28 +48,31 @@
         },
         {
             "parameters": {
-                "jsCode": "// Prepare domain context - keep domain_id and domain for later\nconst d = $input.item.json;\nreturn [{ json: { \n  domain_id: d.domain_id, \n  domain: d.domain, \n  sitemap_url: 'https://' + d.domain + '/sitemap.xml' \n}}];"
+                "jsCode": "// W-3 Hardened: Discovery with sitemap index recursion, gzip, namespace tolerance\n// Responsibility: real URL yield, NOT body classification\n\nconst d = $input.item.json;\nconst domain = d.domain;\nconst domain_id = d.domain_id;\n\n// Build list of sitemap URLs to try\nconst sitemapUrls = [\n  `https://${domain}/sitemap.xml`,\n  `https://${domain}/sitemap_index.xml`,\n  `https://www.${domain}/sitemap.xml`,\n  `https://${domain}/sitemap.xml.gz`\n];\n\nreturn [{ json: { \n  domain_id, \n  domain, \n  sitemap_urls: sitemapUrls,\n  current_index: 0,\n  discovered_urls: [],\n  child_sitemaps: [],\n  recursion_depth: 0,\n  max_depth: 3\n}}];"
             },
             "id": "w3-prep",
             "name": "Prep Domain",
             "type": "n8n-nodes-base.code",
             "typeVersion": 2,
             "position": [
-                650,
+                700,
                 300
             ]
         },
         {
             "parameters": {
                 "operation": "executeQuery",
-                "query": "UPDATE wellness.domains d SET discovery_state = 'in_progress' WHERE d.id = '{{ $json.domain_id }}'::uuid RETURNING d.id as domain_id, d.domain, 'https://' || d.domain || '/sitemap.xml' as sitemap_url;"
+                "query": "UPDATE wellness.domains SET discovery_state = 'in_progress' WHERE id = $1::uuid;",
+                "options": {
+                    "queryReplacement": "={{ [$json.domain_id] }}"
+                }
             },
             "id": "w3-lock",
             "name": "Lock Domain",
             "type": "n8n-nodes-base.postgres",
             "typeVersion": 2.6,
             "position": [
-                850,
+                900,
                 300
             ],
             "credentials": {
@@ -81,91 +84,76 @@
         },
         {
             "parameters": {
-                "jsCode": "// Restore domain context after Lock (which returns nothing useful)\n// We need to get back our domain_id, domain, sitemap_url from Prep Domain\n// Since we can't use $node refs, we'll get it from the execution context\n// Workaround: Pass through from input - Lock Domain receives data from Prep Domain\nconst prev = $input.item.json;\n// After DB update, $input.item.json has the Lock result (empty or just confirmation)\n// We need to reconstruct - get from Prep Domain output which was passed to Lock\n// Since we're in a chain: Prep -> Lock -> this node, prev has Lock output\n// Solution: Store in a way that survives the DB node\n// Actually Lock receives {domain_id, domain, sitemap_url} and passes it through\nreturn [{ json: prev }];"
+                "jsCode": "// Restore context after Lock and begin sitemap fetching\nconst prev = $('Prep Domain').item.json;\nreturn [{ json: prev }];"
             },
             "id": "w3-restore",
             "name": "Restore Context",
             "type": "n8n-nodes-base.code",
             "typeVersion": 2,
             "position": [
-                1000,
+                1100,
                 300
             ]
         },
         {
             "parameters": {
-                "url": "={{ $json.sitemap_url }}",
-                "options": {
-                    "timeout": 20000
-                }
+                "jsCode": "// Fetch and parse all sitemaps with recursion support\nconst data = $input.item.json;\nconst domain = data.domain;\nconst domain_id = data.domain_id;\nlet discovered_urls = data.discovered_urls || [];\nlet child_sitemaps = data.child_sitemaps || [];\nconst recursion_depth = data.recursion_depth || 0;\nconst max_depth = data.max_depth || 3;\n\n// Helper: Parse sitemap XML with namespace tolerance\nfunction parseSitemap(xml) {\n  const result = { urls: [], sitemaps: [] };\n  if (!xml || typeof xml !== 'string' || xml.length < 50) return result;\n  \n  // Remove CDATA and clean\n  let clean = xml.replace(/<!\\[CDATA\\[/g, '').replace(/\\]\\]>/g, '');\n  \n  // Check if this is a sitemap index (contains <sitemap><loc>)\n  const isSitemapIndex = clean.includes('<sitemapindex') || clean.includes('<sitemap>');\n  \n  // Extract <loc> URLs - handle namespaced and non-namespaced\n  // Patterns: <loc>, <ns:loc>, <sitemap:loc>\n  const locPattern = /<(?:[a-z0-9]+:)?loc>\\s*([^<]+)\\s*<\\/(?:[a-z0-9]+:)?loc>/gi;\n  let match;\n  while ((match = locPattern.exec(clean)) !== null) {\n    const url = match[1].trim();\n    if (url && url.startsWith('http')) {\n      // Determine if this is a child sitemap or a content URL\n      if (isSitemapIndex && (url.endsWith('.xml') || url.endsWith('.xml.gz') || url.includes('sitemap'))) {\n        result.sitemaps.push(url);\n      } else {\n        result.urls.push(url);\n      }\n    }\n  }\n  \n  return result;\n}\n\n// Fetch helper with gzip support\nasync function fetchSitemap(url) {\n  try {\n    const resp = await this.helpers.request({\n      method: 'GET',\n      url: url,\n      timeout: 15000,\n      encoding: url.endsWith('.gz') ? null : 'utf8',\n      headers: {\n        'User-Agent': 'Mozilla/5.0 (compatible; AMI-Bot/1.0)',\n        'Accept': 'application/xml, text/xml, */*',\n        'Accept-Encoding': 'gzip, deflate'\n      },\n      resolveWithFullResponse: false,\n      simple: false\n    });\n    \n    // Handle gzip - n8n should auto-decompress, but verify\n    if (typeof resp === 'string') return resp;\n    if (resp && resp.body) return resp.body;\n    return '';\n  } catch (e) {\n    return '';\n  }\n}\n\n// Process sitemap URLs to try\nconst sitemapUrls = data.sitemap_urls || [];\n\nfor (const sitemapUrl of sitemapUrls) {\n  // Skip if we've already discovered enough\n  if (discovered_urls.length >= 500) break;\n  \n  const xml = await fetchSitemap.call(this, sitemapUrl);\n  if (!xml) continue;\n  \n  const parsed = parseSitemap(xml);\n  \n  // Add discovered URLs\n  discovered_urls = discovered_urls.concat(parsed.urls);\n  \n  // Add child sitemaps for recursion\n  if (recursion_depth < max_depth) {\n    child_sitemaps = child_sitemaps.concat(parsed.sitemaps);\n  }\n}\n\n// Process child sitemaps (recursion)\nif (child_sitemaps.length > 0 && recursion_depth < max_depth) {\n  for (const childUrl of child_sitemaps.slice(0, 20)) {\n    if (discovered_urls.length >= 500) break;\n    \n    const xml = await fetchSitemap.call(this, childUrl);\n    if (!xml) continue;\n    \n    const parsed = parseSitemap(xml);\n    discovered_urls = discovered_urls.concat(parsed.urls);\n  }\n}\n\n// Dedupe and filter\nconst uniqueUrls = [...new Set(discovered_urls)];\n\n// Filter out obvious non-content URLs\nconst contentUrls = uniqueUrls.filter(url => {\n  // Keep all URLs - Layer-1 prefilter is in W-4, not here\n  // W-3 responsibility is discovery yield, not classification\n  return url.startsWith('http');\n}).slice(0, 200);\n\nif (contentUrls.length === 0) {\n  return [{ json: { domain_id, domain, _skip: true, urls_found: 0 }}];\n}\n\n// Return URLs for insertion\nreturn contentUrls.map(url => ({ json: { domain_id, domain, url }}));"
             },
-            "id": "w3-fetch",
-            "name": "Fetch Sitemap",
-            "type": "n8n-nodes-base.httpRequest",
-            "typeVersion": 4.2,
-            "position": [
-                1200,
-                300
-            ],
-            "continueOnFail": true
-        },
-        {
-            "parameters": {
-                "jsCode": "// After HTTP fetch, we lose domain context\n// We need to extract domain from sitemap URL in the response or use a workaround\n// The HTTP response replaces our data - we need to get domain from the URL itself\nconst resp = $input.item.json;\n\n// Try to get sitemap URL from response headers or reconstruct\nlet domain = '';\nlet domain_id = '';\n\n// The only way: extract from response URL if available\nif (resp.url) {\n  const match = resp.url.match(/^https?:\\/\\/(?:www\\.)?([^\\/:]+)/i);\n  if (match) domain = match[1].toLowerCase();\n}\n\n// Get XML content\nlet xml = '';\nif (typeof resp === 'string') xml = resp;\nelse if (resp.data) xml = resp.data;\nelse if (resp.body) xml = resp.body;\n\n// We need domain_id - lookup from DB would be needed\n// For now, we'll use domain to lookup later\nreturn [{ json: { domain, _xml: xml, _needsDomainId: true } }];"
-            },
-            "id": "w3-merge",
-            "name": "Merge Fetch",
+            "id": "w3-fetch-parse",
+            "name": "Fetch and Parse Sitemaps",
             "type": "n8n-nodes-base.code",
             "typeVersion": 2,
             "position": [
-                1400,
-                300
-            ]
-        },
-        {
-            "parameters": {
-                "jsCode": "// Parse sitemap XML and extract URLs\n// Extract domain from the URLs found since context was lost\nconst data = $input.item.json;\nconst xml = data._xml || '';\nlet domain = data.domain || '';\n\nfunction extractDomain(urlStr) {\n  if (!urlStr) return null;\n  const match = urlStr.match(/^https?:\\/\\/(?:www\\.)?([^\\/:]+)/i);\n  return match ? match[1].toLowerCase() : null;\n}\n\nconst urls = [];\nif (xml && typeof xml === 'string' && xml.length > 50) {\n  const cleanXml = xml.replace(/<!\\[CDATA\\[/g, '').replace(/\\]\\]>/g, '');\n  const locMatches = cleanXml.match(/<loc>([^<]+)<\\/loc>/g) || [];\n  \n  for (const match of locMatches) {\n    const url = match.replace('<loc>', '').replace('</loc>', '').trim();\n    if (url && url.startsWith('http')) {\n      // Extract domain from the URL if we don't have it\n      if (!domain) {\n        domain = extractDomain(url) || '';\n      }\n      urls.push({ url, domain });\n    }\n  }\n}\n\nif (urls.length === 0) {\n  return [{ json: { _skip: true, domain } }];\n}\n\nreturn urls.slice(0, 100).map(u => ({ json: u }));"
-            },
-            "id": "w3-parse",
-            "name": "Parse Sitemap",
-            "type": "n8n-nodes-base.code",
-            "typeVersion": 2,
-            "position": [
-                1600,
+                1300,
                 300
             ]
         },
         {
             "parameters": {
                 "conditions": {
-                    "boolean": [
+                    "options": {
+                        "caseSensitive": true,
+                        "leftValue": "",
+                        "typeValidation": "strict"
+                    },
+                    "conditions": [
                         {
-                            "value1": "={{ $json._skip !== true && $json.url }}",
-                            "value2": true
+                            "id": "has-url",
+                            "leftValue": "={{ $json.url }}",
+                            "rightValue": "",
+                            "operator": {
+                                "type": "string",
+                                "operation": "notEmpty"
+                            }
                         }
-                    ]
-                }
+                    ],
+                    "combinator": "and"
+                },
+                "options": {}
             },
             "id": "w3-filter",
-            "name": "Filter Valid",
+            "name": "Filter Valid URLs",
             "type": "n8n-nodes-base.if",
             "typeVersion": 2,
             "position": [
-                1800,
+                1500,
                 300
             ]
         },
         {
             "parameters": {
                 "operation": "executeQuery",
-                "query": "WITH ins AS (\n  INSERT INTO wellness.pages (domain_id, url)\n  SELECT d.id, '{{ $json.url }}'\n  FROM wellness.domains d WHERE d.domain = '{{ $json.domain }}'\n  ON CONFLICT (domain_id, url) DO UPDATE SET last_seen_at = NOW()\n  RETURNING domain_id\n)\nSELECT d.domain FROM ins JOIN wellness.domains d ON d.id = ins.domain_id;"
+                "query": "INSERT INTO wellness.pages (domain_id, url)\nVALUES ($1::uuid, $2)\nON CONFLICT (domain_id, url) DO UPDATE SET last_seen_at = NOW();",
+                "options": {
+                    "queryReplacement": "={{ [$json.domain_id, $json.url] }}"
+                }
             },
             "id": "w3-upsert",
             "name": "Upsert Pages",
             "type": "n8n-nodes-base.postgres",
             "typeVersion": 2.6,
             "position": [
-                2000,
+                1700,
                 250
             ],
             "credentials": {
@@ -178,28 +166,31 @@
         },
         {
             "parameters": {
-                "jsCode": "// Get domain for completion - use first() for Run Once mode\nconst items = $input.all();\nif (items.length === 0) return [{ json: { domain: '' } }];\nconst item = items[0].json;\nreturn [{ json: { domain: item.domain || '' } }];"
+                "jsCode": "// Aggregate after inserts and prep for completion\n// CRITICAL: Get domain context from Prep Domain to avoid empty uuid\nconst prepData = $('Prep Domain').item.json;\nconst items = $input.all();\nconst urlsInserted = items.filter(i => i.json.url).length;\n\nreturn [{ json: { \n  domain_id: prepData.domain_id, \n  domain: prepData.domain, \n  urls_inserted: urlsInserted \n}}];"
             },
-            "id": "w3-prep-complete",
-            "name": "Prep Complete",
+            "id": "w3-aggregate",
+            "name": "Aggregate Results",
             "type": "n8n-nodes-base.code",
             "typeVersion": 2,
             "position": [
-                2200,
+                1900,
                 300
             ]
         },
         {
             "parameters": {
                 "operation": "executeQuery",
-                "query": "UPDATE wellness.domains SET discovery_state = 'complete' WHERE domain = '{{ $json.domain }}';"
+                "query": "UPDATE wellness.domains SET discovery_state = 'complete' WHERE id = $1::uuid;",
+                "options": {
+                    "queryReplacement": "={{ [$json.domain_id] }}"
+                }
             },
             "id": "w3-complete",
             "name": "Complete Domain",
             "type": "n8n-nodes-base.postgres",
             "typeVersion": 2.6,
             "position": [
-                2400,
+                2100,
                 300
             ],
             "credentials": {
@@ -208,6 +199,43 @@
                     "name": "Postgres account"
                 }
             }
+        },
+        {
+            "parameters": {
+                "jsCode": "return [{ json: { done: true }}];"
+            },
+            "id": "w3-continue",
+            "name": "Continue",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                2300,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "jsCode": "// Handle skip case (no URLs found)\n// CRITICAL: Get domain context from Prep Domain to avoid empty uuid\nconst prepData = $('Prep Domain').item.json;\nreturn [{ json: { domain_id: prepData.domain_id, domain: prepData.domain, urls_inserted: 0 }}];"
+            },
+            "id": "w3-skip-handler",
+            "name": "Handle Skip",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1700,
+                400
+            ]
+        },
+        {
+            "parameters": {},
+            "id": "w3-done",
+            "name": "Done",
+            "type": "n8n-nodes-base.noOp",
+            "typeVersion": 1,
+            "position": [
+                700,
+                500
+            ]
         }
     ],
     "connections": {
@@ -241,6 +269,13 @@
                         "type": "main",
                         "index": 0
                     }
+                ],
+                [
+                    {
+                        "node": "Done",
+                        "type": "main",
+                        "index": 0
+                    }
                 ]
             ]
         },
@@ -270,47 +305,25 @@
             "main": [
                 [
                     {
-                        "node": "Fetch Sitemap",
+                        "node": "Fetch and Parse Sitemaps",
                         "type": "main",
                         "index": 0
                     }
                 ]
             ]
         },
-        "Fetch Sitemap": {
+        "Fetch and Parse Sitemaps": {
             "main": [
                 [
                     {
-                        "node": "Merge Fetch",
+                        "node": "Filter Valid URLs",
                         "type": "main",
                         "index": 0
                     }
                 ]
             ]
         },
-        "Merge Fetch": {
-            "main": [
-                [
-                    {
-                        "node": "Parse Sitemap",
-                        "type": "main",
-                        "index": 0
-                    }
-                ]
-            ]
-        },
-        "Parse Sitemap": {
-            "main": [
-                [
-                    {
-                        "node": "Filter Valid",
-                        "type": "main",
-                        "index": 0
-                    }
-                ]
-            ]
-        },
-        "Filter Valid": {
+        "Filter Valid URLs": {
             "main": [
                 [
                     {
@@ -321,7 +334,7 @@
                 ],
                 [
                     {
-                        "node": "Prep Complete",
+                        "node": "Handle Skip",
                         "type": "main",
                         "index": 0
                     }
@@ -332,14 +345,25 @@
             "main": [
                 [
                     {
-                        "node": "Prep Complete",
+                        "node": "Aggregate Results",
                         "type": "main",
                         "index": 0
                     }
                 ]
             ]
         },
-        "Prep Complete": {
+        "Handle Skip": {
+            "main": [
+                [
+                    {
+                        "node": "Aggregate Results",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Aggregate Results": {
             "main": [
                 [
                     {
@@ -351,6 +375,17 @@
             ]
         },
         "Complete Domain": {
+            "main": [
+                [
+                    {
+                        "node": "Continue",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Continue": {
             "main": [
                 [
                     {

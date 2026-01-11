@@ -1,0 +1,77 @@
+{
+    "name": "W-5C: Clinic Keyword Rollup",
+    "nodes": [
+        {
+            "parameters": {},
+            "id": "w5c-trigger",
+            "name": "Manual Trigger",
+            "type": "n8n-nodes-base.manualTrigger",
+            "typeVersion": 1,
+            "position": [
+                100,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "-- Roll up page keywords to clinic level\n-- Aggregate all keywords from pages belonging to each clinic's domain(s)\n\nWITH clinic_page_keywords AS (\n  SELECT \n    d.clinic_id,\n    pk.term,\n    SUM(pk.score) as total_score,\n    COUNT(*) as page_count\n  FROM wellness.page_keywords pk\n  JOIN wellness.pages p ON pk.page_id = p.id\n  JOIN wellness.domains d ON p.domain_id = d.id\n  WHERE d.clinic_id IS NOT NULL\n  GROUP BY d.clinic_id, pk.term\n  HAVING COUNT(*) >= 1\n),\nranked AS (\n  SELECT \n    clinic_id,\n    term,\n    total_score,\n    page_count,\n    ROW_NUMBER() OVER (PARTITION BY clinic_id ORDER BY total_score DESC) as rank\n  FROM clinic_page_keywords\n)\nINSERT INTO wellness.clinic_keywords (clinic_id, term, total_score, source_method)\nSELECT \n  clinic_id,\n  term,\n  total_score,\n  'rollup_v1'\nFROM ranked\nWHERE rank <= 50  -- Top 50 keywords per clinic\nON CONFLICT (clinic_id, term) DO UPDATE SET\n  total_score = EXCLUDED.total_score,\n  source_method = EXCLUDED.source_method,\n  updated_at = NOW()\nRETURNING clinic_id, term, total_score;"
+            },
+            "id": "w5c-rollup",
+            "name": "Rollup Keywords",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.6,
+            "position": [
+                300,
+                300
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "postgres-creds-id",
+                    "name": "Postgres account"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "jsCode": "// Get summary of rollup\nconst items = $input.all();\nconst clinicCount = new Set(items.map(i => i.json.clinic_id)).size;\nconst keywordCount = items.length;\n\nreturn [{ json: {\n  success: true,\n  clinics_updated: clinicCount,\n  keywords_rolled_up: keywordCount\n}}];"
+            },
+            "id": "w5c-summary",
+            "name": "Summary",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                500,
+                300
+            ]
+        }
+    ],
+    "connections": {
+        "Manual Trigger": {
+            "main": [
+                [
+                    {
+                        "node": "Rollup Keywords",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Rollup Keywords": {
+            "main": [
+                [
+                    {
+                        "node": "Summary",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        }
+    },
+    "settings": {
+        "executionOrder": "v1"
+    },
+    "active": false
+}

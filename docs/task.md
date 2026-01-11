@@ -2,6 +2,8 @@
 
 This is the granular task checklist for the AMI implementation. Update status as you progress.
 
+> **Source of Truth:** `pipeline_strategy.md` defines workflows W1–W8.
+
 ---
 
 ## Phase 1: Infrastructure & Seeding
@@ -52,34 +54,51 @@ This is the granular task checklist for the AMI implementation. Update status as
 ## Phase 3: Crawl & Enrichment (W4-W6)
 
 ### 3.1 Workflows
-- [ ] T-301: Build W4 (Crawl Router) n8n workflow
-- [ ] T-302: Build W5A (SEO Extraction) n8n workflow
-- [ ] T-303: Build W5B (Keyword Extraction) n8n workflow
-- [ ] T-304: Build W5C (Clinic Keyword Rollup) n8n workflow
-- [ ] T-305: Build W6 (Commercial Facts) n8n workflow
+- [x] T-301: Build W4 (Crawl Router) n8n workflow
+- [x] T-302: Build W5A (SEO Extraction) n8n workflow
+- [x] T-303: Build W5B (Keyword Extraction) n8n workflow
+- [x] T-304: Build W5C (Clinic Keyword Rollup) n8n workflow
+- [x] T-305: Build W6 (Commercial Facts) n8n workflow
 
 ### 3.2 Verification (Phase 3)
-- [ ] T-306: Run W4 for sample pages, verify `page_fetches`, `page_content`, `content_hash`
+- [/] T-306: Run W4 for sample pages, verify `page_fetches`, `page_content`, `content_hash`
 - [ ] T-307: Run W5, verify `page_seo`, `page_keywords`, `clinic_keywords`
 - [ ] T-308: Run W6, verify `clinic_offers`, `clinic_ctas` with evidence
+
+### 3.3 Hotfixes & Quality Improvements (Phase 3 Throughput Plan)
+> From Phase 3: Throughput + Quality Plan (v3.2)
+
+- [/] T-309: W-3 sitemap index recursion (max depth 3) + gzip + XML namespace tolerance
+- [/] T-310: W-3 daily operational loop for domains with zero pages
+- [/] T-311: W-6 WhatsApp CTA evidence fix (min 50 char snippet)
+- [/] T-312: W-4 canonical non-content classifier (Layer 1 URL prefilter + Layer 2 body detection)
+- [/] T-313: W-5B/W-6 runtime snippet computation (bounded payload, top-N URLs)
 
 ---
 
 ## Phase 4: Scoring & Monitoring (W7-W8)
 
+### 4.0 Schema Migration
+- [x] T-400: Create `010_scoring_columns.sql` (score_confidence, score_breakdown, scored_at)
+
 ### 4.1 Workflows
-- [ ] T-401: Build W7 (Scoring) n8n workflow
-- [ ] T-402: Build W8 (Monitor + Expand) n8n workflow
+- [x] T-401: Build W7 (Scoring) n8n workflow
+- [x] T-402: Build W8 (Monitor + Expand) n8n workflow
 
 ### 4.2 Verification (Phase 4)
-- [ ] T-403: Run W7, verify `competitor_score` populated on `clinics`
-- [ ] T-404: Trigger W8, verify schedule logic and domain expansion
+- [/] T-403: Run W7, verify `competitor_score` populated on `clinics`
+- [/] T-404: Trigger W8, verify schedule logic and domain expansion
+
+> **Verification files created:**
+> - `tests/sql/assert_w7_scoring.sql`
+> - `tests/sql/assert_w8_monitor.sql`
 
 ---
 
-## Phase 5: Orchestration (O-Run)
+## Backlog: Operational Improvements
 
-- [ ] T-501: Build O-Run orchestrator workflow
-- [ ] T-502: Run O-Run in `smoke` mode for 1 vertical
-- [ ] T-503: Verify `runs` and `jobs` tables populated correctly
-- [ ] T-504: Full E2E test: O-Run → W1-W7 completes without manual intervention
+> These items are derived from `ami-master-plan.md` but not scoped in `pipeline_strategy.md` as separate phases.
+
+- [ ] T-B01: Create "Ops views" (run health, crawl health, extraction health) for debugging
+- [ ] T-B02: Validate runs + jobs queue contract (claim/lock/retry/expire)
+- [ ] T-B03: End-to-end smoke test: W1 → W7 completes for 1 vertical without manual intervention

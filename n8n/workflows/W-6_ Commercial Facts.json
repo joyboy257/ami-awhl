@@ -1,0 +1,456 @@
+{
+  "name": "W-6: Commercial Facts copy",
+  "nodes": [
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "f7bc9657-03da-4196-ae3d-4dd125694421",
+      "name": "Split Pages",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        -1104,
+        992
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== STAGE A: DETERMINISTIC COMMERCIAL EXTRACTION (v3.2) =====\n// Per-source CTA matching (fix for WhatsApp evidence gap)\n// Layer-2 body signature exclusion (sitemap_xml detection)\n\nconst data = $input.item.json;\nconst markdown = (data.markdown || '').substring(0, 50000);\nconst htmlBody = (data.html_body || '').substring(0, 100000);\nconst url = data.url || '';\nconst pageId = data.page_id;\nconst clinicId = data.clinic_id;\nconst contentHash = data.content_hash;\n\n// Layer-2: Body signature detection (sitemap_xml) - html_body first\nconst isSitemapContent = \n  htmlBody.includes('<urlset') ||\n  htmlBody.includes('<sitemapindex') ||\n  htmlBody.includes('xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\"') ||\n  (htmlBody.includes('<?xml') && htmlBody.includes('<url>') && htmlBody.includes('<loc>')) ||\n  (!htmlBody && markdown.match(/^https?:\\/\\//));\n\nif (isSitemapContent) {\n  return [{ json: {\n    page_id: pageId, clinic_id: clinicId, content_hash: contentHash, url: url,\n    reason_code: 'sitemap_xml_excluded', offers: [], ctas: [],\n    stats: { commercial_lines: 0, offers_extracted: 0, ctas_extracted: 0 }\n  }}];\n}\n\n// Helper: Clean HTML entities\nfunction cleanEvidence(text) {\n  return (text || '').replace(/&amp;/g, '&').replace(/&nbsp;/g, ' ')\n    .replace(/&#\\d+;/g, '').replace(/<[^>]+>/g, ' ').replace(/\\s+/g, ' ')\n    .trim().substring(0, 200);\n}\n\n// Helper: Get evidence window from the SAME source (±100 chars, ensures >= 50 chars context)\nfunction getEvidenceFromSource(matchText, matchIndex, source) {\n  if (!source || matchIndex < 0 || matchIndex >= source.length) {\n    return cleanEvidence(matchText);\n  }\n  const start = Math.max(0, matchIndex - 100);\n  const end = Math.min(source.length, matchIndex + matchText.length + 100);\n  const evidence = cleanEvidence(source.substring(start, end));\n  // Ensure minimum 50 chars for quality\n  return evidence.length >= 50 ? evidence : cleanEvidence(source.substring(Math.max(0, matchIndex - 150), Math.min(source.length, matchIndex + matchText.length + 150)));\n}\n\n// A1: BUILD COMMERCIAL SNIPPET PACK\nconst commercialPattern = /\\$|SGD|S\\$|U\\.P\\.|usual|was|now|save|off|%|trial|first trial|promo|promotion|package|bundle|deal|limited|whatsapp|wa\\.me|book|appointment|schedule|call|tel:|email|mailto|form|enquire/i;\nconst lines = markdown.split('\\n');\nconst commercialLines = lines.filter(line => commercialPattern.test(line) && line.trim().length > 10).slice(0, 80);\nconst snippetPack = commercialLines.join('\\n').substring(0, 5000);\n\nif (snippetPack.length < 20) {\n  return [{ json: {\n    page_id: pageId, clinic_id: clinicId, content_hash: contentHash, url: url,\n    reason_code: 'no_commercial_signals', offers: [], ctas: [],\n    stats: { commercial_lines: 0, offers_extracted: 0, ctas_extracted: 0 }\n  }}];\n}\n\n// A2: DETERMINISTIC OFFERS EXTRACTION\nconst pricePattern = /(?:S?\\$|SGD\\s*)([\\d,]+(?:\\.\\d{2})?)/gi;\nconst offers = [];\nconst seenOffers = new Set();\nlet match;\n\nwhile ((match = pricePattern.exec(snippetPack)) !== null) {\n  const priceValue = parseFloat(match[1].replace(/,/g, ''));\n  if (isNaN(priceValue) || priceValue <= 0 || priceValue > 50000) continue;\n  \n  const start = Math.max(0, match.index - 150);\n  const end = Math.min(snippetPack.length, match.index + match[0].length + 150);\n  const context = snippetPack.substring(start, end).replace(/\\s+/g, ' ').trim();\n  \n  let offerType = 'regular';\n  if (/trial|first trial|1st trial|new customer|first.?time/i.test(context)) offerType = 'trial';\n  else if (/package|bundle|sessions|\\d+x|\\d+\\s*session/i.test(context)) offerType = 'package';\n  else if (/promo|promotion|limited|sale|%\\s*off|cny|pwp|special/i.test(context)) offerType = 'promo';\n  \n  let serviceName = 'Unknown Service';\n  const serviceMatch = context.match(/([A-Z][a-z]+(?:\\s+[A-Z][a-z]+){0,3})(?:\\s+(?:Wax|Treatment|Therapy|Service|Package|Session))?/g);\n  if (serviceMatch && serviceMatch.length > 0) serviceName = serviceMatch[0].trim().substring(0, 100);\n  \n  let confidence = 0;\n  if (/\\$|SGD|S\\$/i.test(context)) confidence += 0.4;\n  if (/trial|package|promo/i.test(context)) confidence += 0.2;\n  if (serviceName !== 'Unknown Service') confidence += 0.2;\n  if (/u\\.p\\.|save|limited/i.test(context)) confidence += 0.1;\n  if (context.length >= 50) confidence += 0.1;\n  \n  const evidenceSnippet = getEvidenceFromSource(match[0], match.index, snippetPack);\n  const dedupeKey = `${serviceName}|${offerType}|${priceValue}`;\n  if (seenOffers.has(dedupeKey)) continue;\n  seenOffers.add(dedupeKey);\n  \n  if (confidence >= 0.5) {\n    offers.push({ service_name: serviceName, offer_type: offerType, price_value: priceValue,\n      price_currency: 'SGD', evidence_snippet: evidenceSnippet, confidence });\n  }\n}\n\noffers.sort((a, b) => b.confidence - a.confidence);\nconst topOffers = offers.slice(0, 10);\n\n// A3: DETERMINISTIC CTAs EXTRACTION (PER-SOURCE MATCHING)\nconst ctas = [];\nconst seenCtas = new Set();\n\n// WhatsApp - search markdown FIRST, then htmlBody SEPARATELY\nconst waPattern = /wa\\.me\\/[\\d+]+|api\\.whatsapp\\.com\\/send\\?phone=[\\d+]+|whatsapp[:\\s]*\\+?[\\d\\s()-]{8,}/gi;\n\n// Search markdown first\nlet waMatch;\nwhile ((waMatch = waPattern.exec(markdown)) !== null) {\n  const key = 'whatsapp|' + waMatch[0].toLowerCase().substring(0, 50);\n  if (!seenCtas.has(key)) {\n    seenCtas.add(key);\n    ctas.push({\n      cta_type: 'whatsapp', cta_text: 'WhatsApp',\n      evidence_snippet: getEvidenceFromSource(waMatch[0], waMatch.index, markdown),\n      confidence: 0.9\n    });\n  }\n}\n// Reset and search htmlBody\nwaPattern.lastIndex = 0;\nwhile ((waMatch = waPattern.exec(htmlBody)) !== null) {\n  const key = 'whatsapp|' + waMatch[0].toLowerCase().substring(0, 50);\n  if (!seenCtas.has(key)) {\n    seenCtas.add(key);\n    ctas.push({\n      cta_type: 'whatsapp', cta_text: 'WhatsApp',\n      evidence_snippet: getEvidenceFromSource(waMatch[0], waMatch.index, htmlBody),\n      confidence: 0.9\n    });\n  }\n}\n\n// Tel - htmlBody only\nconst telPattern = /tel:[\\d\\s+()-]+/gi;\nwhile ((match = telPattern.exec(htmlBody)) !== null) {\n  const key = 'call|' + match[0].toLowerCase();\n  if (!seenCtas.has(key)) {\n    seenCtas.add(key);\n    ctas.push({ cta_type: 'call', cta_text: 'Call',\n      evidence_snippet: getEvidenceFromSource(match[0], match.index, htmlBody), confidence: 0.9 });\n  }\n}\n\n// Email - htmlBody only\nconst mailtoPattern = /mailto:[^\\\"'>\\s]+/gi;\nwhile ((match = mailtoPattern.exec(htmlBody)) !== null) {\n  const key = 'email|' + match[0].toLowerCase();\n  if (!seenCtas.has(key)) {\n    seenCtas.add(key);\n    ctas.push({ cta_type: 'email', cta_text: 'Email',\n      evidence_snippet: getEvidenceFromSource(match[0], match.index, htmlBody), confidence: 0.9 });\n  }\n}\n\n// Booking providers\nconst bookingProviders = ['calendly', 'fresha', 'mindbody', 'acuity', 'simplybook', 'setmore', 'booksy'];\nfor (const provider of bookingProviders) {\n  const idx = htmlBody.toLowerCase().indexOf(provider);\n  if (idx !== -1) {\n    const key = 'book|' + provider;\n    if (!seenCtas.has(key)) {\n      seenCtas.add(key);\n      ctas.push({ cta_type: 'book', cta_text: provider.charAt(0).toUpperCase() + provider.slice(1) + ' Booking',\n        evidence_snippet: getEvidenceFromSource(provider, idx, htmlBody), confidence: 0.8 });\n    }\n  }\n}\n\n// Form detection\nif (/<form[\\s>]/i.test(htmlBody)) {\n  const idx = htmlBody.toLowerCase().indexOf('<form');\n  ctas.push({ cta_type: 'form', cta_text: 'Contact Form',\n    evidence_snippet: getEvidenceFromSource('<form', idx, htmlBody), confidence: 0.7 });\n}\n\nctas.sort((a, b) => b.confidence - a.confidence);\nconst topCtas = ctas.slice(0, 10).filter(c => c.confidence >= 0.6);\n\nreturn [{ json: {\n  page_id: pageId, clinic_id: clinicId, content_hash: contentHash, url: url,\n  reason_code: topOffers.length > 0 ? 'deterministic_success' : (topCtas.length > 0 ? 'ctas_only' : 'no_offers_found'),\n  offers: topOffers, ctas: topCtas,\n  stats: { commercial_lines: commercialLines.length, offers_extracted: topOffers.length, ctas_extracted: topCtas.length }\n}}];"
+      },
+      "id": "f0647d25-ff9a-4d21-8682-a0f890d16e82",
+      "name": "Stage A: Deterministic Extract",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -880,
+        768
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Prep All Inserts - stores both offers and CTAs for downstream\nconst data = $input.item.json;\n\nconst offerInserts = (data.offers || []).map(o => ({\n  clinic_id: data.clinic_id,\n  service_name: (o.service_name || 'Unknown').substring(0, 200),\n  offer_type: o.offer_type || 'regular',\n  price_currency: o.price_currency || 'SGD',\n  price_value: o.price_value,\n  evidence_url: data.url,\n  evidence_snippet: (o.evidence_snippet || '').substring(0, 500),\n  content_hash: data.content_hash\n}));\n\nconst ctaInserts = (data.ctas || []).map(c => ({\n  clinic_id: data.clinic_id,\n  page_id: data.page_id,\n  cta_type: c.cta_type || 'other',\n  cta_text: (c.cta_text || 'Unknown').substring(0, 200),\n  evidence_snippet: (c.evidence_snippet || '').substring(0, 500)\n}));\n\nreturn [{ json: {\n  page_id: data.page_id,\n  clinic_id: data.clinic_id,\n  url: data.url,\n  reason_code: data.reason_code,\n  stats: data.stats,\n  offer_inserts: offerInserts,\n  cta_inserts: ctaInserts\n}}];"
+      },
+      "id": "beed20f7-f660-45a3-9ab4-dc46bb0f92b3",
+      "name": "Prep All Inserts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -656,
+        768
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "e8861ea3-04b2-48df-9072-076579607473",
+              "leftValue": "=\"clinic_id\" {{ $json.clinic_id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "exists",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "904e3557-7e9a-41b9-9af2-62bf4a65a488",
+      "name": "Has clinic_id?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -432,
+        768
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "7114aacd-5ca5-4981-aada-3566be19b6bc",
+              "leftValue": "={{ $json.stats.offers_extracted }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "7f0af5c8-17a7-4a0e-bf0e-a364cdf127b0",
+      "name": "Has Offers?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -208,
+        672
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Expand offers for batch insert - handle empty gracefully\nconst data = $input.item.json;\nconst offers = data.offer_inserts || [];\nif (offers.length === 0) return [];\nreturn offers.map(o => ({ json: o }));"
+      },
+      "id": "aafcb63b-1df8-4792-afb9-175dfea02278",
+      "name": "Expand Offers",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        16,
+        608
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO wellness.clinic_offers (\n  clinic_id, service_name, offer_type, price_currency, price_value,\n  evidence_url, evidence_snippet, extracted_for_hash\n) VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8)\nON CONFLICT (clinic_id, service_name, offer_type, extracted_for_hash) DO NOTHING;",
+        "options": {
+          "queryReplacement": "={{ [$json.clinic_id, $json.service_name, $json.offer_type, $json.price_currency, $json.price_value, $json.evidence_url, $json.evidence_snippet, $json.content_hash] }}"
+        }
+      },
+      "id": "8feeb61d-5bc1-4e5d-a71e-67c7514bb342",
+      "name": "Store Offers",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        240,
+        608
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "ami_postgres",
+          "name": "Postgres account"
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "mode": "append"
+      },
+      "id": "e283ddff-3fa0-4523-b307-f1014ca366b3",
+      "name": "Merge",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        464,
+        672
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// RF1: CTAs always processed - get from Prep All Inserts\nconst prepData = $('Prep All Inserts').item.json;\nconst ctaInserts = prepData.cta_inserts || [];\n\nif (ctaInserts.length === 0) {\n  return [{ json: { skip: true, reason: 'no_ctas' }}];\n}\n\nreturn ctaInserts.map(c => ({ json: c }));"
+      },
+      "id": "02902e10-b8cc-4c23-a7f8-e89dacdefa89",
+      "name": "Expand CTAs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        688,
+        672
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO wellness.clinic_ctas (\n  clinic_id, page_id, cta_type, cta_text, evidence_snippet\n) VALUES ($1::uuid, $2::uuid, $3, $4, $5)\nON CONFLICT (page_id, cta_text, cta_type) DO NOTHING;",
+        "options": {
+          "queryReplacement": "={{ [$json.clinic_id, $json.page_id, $json.cta_type, $json.cta_text, $json.evidence_snippet] }}"
+        }
+      },
+      "id": "c0630e60-f61c-4e0b-963d-c7b51df3560b",
+      "name": "Store CTAs",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        912,
+        672
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "ami_postgres",
+          "name": "Postgres account"
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Continue to next page\nreturn [{ json: { done: true }}];"
+      },
+      "id": "9847d74b-ab72-4d5e-b053-fb4865e353bd",
+      "name": "Continue",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1136,
+        896
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// RF0-B: Skip - missing clinic_id\nreturn [{ json: { skip: true, skip_reason: 'missing_clinic_id' }}];"
+      },
+      "id": "17c15c78-9ce1-45c8-9b1d-83715e4111e1",
+      "name": "Skip No Clinic",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        912,
+        896
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "54b2d544-ac6e-4b60-af50-30cc8d6d3cdf",
+      "name": "Done",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        -880,
+        992
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT pc.id as content_id, pc.page_id, pc.content_hash,\n       pc.markdown, pc.html_body, pc.word_count,\n       p.url, d.domain, d.clinic_id\nFROM wellness.page_content pc\nJOIN wellness.pages p ON pc.page_id = p.id\nJOIN wellness.domains d ON p.domain_id = d.id\nWHERE d.clinic_id IS NOT NULL\n  AND pc.word_count >= 100\n  AND p.url NOT ILIKE '%sitemap%'\n  AND p.url !~* 'sitemap.*\\.xml$'\n  AND pc.markdown NOT LIKE 'https://%'\n  AND NOT EXISTS (\n    SELECT 1 FROM wellness.clinic_offers co \n    WHERE co.extracted_for_hash = pc.content_hash\n  )\nORDER BY \n  CASE \n    WHEN p.url ~* '/(pricing|price|rates|fees)' THEN 0\n    WHEN p.url ~* '/(service|treatment|package)' THEN 1\n    WHEN p.url ~* '/(promo|promotion|deal|offer)' THEN 2\n    WHEN p.url ~* '/(contact|book|appointment)' THEN 3\n    ELSE 4\n  END,\n  pc.word_count DESC\nLIMIT 20;",
+        "options": {}
+      },
+      "id": "e04c6420-938c-433a-8540-644bdc8de67e",
+      "name": "Get Commercial Pages2",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -1328,
+        992
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "ami_postgres",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -1616,
+        992
+      ],
+      "id": "a1136dcb-9d54-470b-a5c4-51a79d2d1c00",
+      "name": "When clicking ‘Execute workflow’"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Split Pages": {
+      "main": [
+        [
+          {
+            "node": "Done",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Stage A: Deterministic Extract",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Stage A: Deterministic Extract": {
+      "main": [
+        [
+          {
+            "node": "Prep All Inserts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prep All Inserts": {
+      "main": [
+        [
+          {
+            "node": "Has clinic_id?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has clinic_id?": {
+      "main": [
+        [
+          {
+            "node": "Has Offers?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Skip No Clinic",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Offers?": {
+      "main": [
+        [
+          {
+            "node": "Expand Offers",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Expand Offers": {
+      "main": [
+        [
+          {
+            "node": "Store Offers",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store Offers": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Expand CTAs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Expand CTAs": {
+      "main": [
+        [
+          {
+            "node": "Store CTAs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store CTAs": {
+      "main": [
+        [
+          {
+            "node": "Continue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Skip No Clinic": {
+      "main": [
+        [
+          {
+            "node": "Continue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Continue": {
+      "main": [
+        [
+          {
+            "node": "Split Pages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Commercial Pages2": {
+      "main": [
+        [
+          {
+            "node": "Split Pages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "Get Commercial Pages2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "50361b55-9a14-4ee8-923e-afedb4c50d73",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "30a9083b1c68e0f8353caa8ebd31e7183824b56062e4e13731c2fd63ab392165"
+  },
+  "id": "ODcAXl2FA1rogo11",
+  "tags": []
+}

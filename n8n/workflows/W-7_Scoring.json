@@ -1,0 +1,132 @@
+{
+    "name": "W-7: Scoring",
+    "nodes": [
+        {
+            "parameters": {},
+            "id": "w7-trigger",
+            "name": "Manual Trigger",
+            "type": "n8n-nodes-base.manualTrigger",
+            "typeVersion": 1,
+            "position": [
+                100,
+                500
+            ]
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "-- Compute ALL scores in a single query to avoid parallel branch issues\n-- This combines visibility, inventory, conversion, commercial, technical, and completeness\n\nWITH \n-- Visibility scores (30-day window, tier-weighted)\nvisibility_raw AS (\n  SELECT \n    d.clinic_id,\n    c.vertical_id,\n    COALESCE(SUM(LEAST(30,\n      (11 - sr.rank_position) * \n      CASE sq.priority_tier WHEN 'A' THEN 3 WHEN 'B' THEN 2 ELSE 1 END *\n      CASE sr.block_type WHEN 'local_pack' THEN 1.5 ELSE 1.0 END\n    )), 0)::NUMERIC as raw_score,\n    COUNT(DISTINCT CASE WHEN sq.priority_tier = 'A' THEN ss.query_id END) as tier_a_appearances,\n    COUNT(DISTINCT CASE WHEN sq.priority_tier = 'B' THEN ss.query_id END) as tier_b_appearances,\n    COUNT(DISTINCT CASE WHEN sr.block_type = 'local_pack' THEN sr.id END) as local_pack_appearances\n  FROM wellness.clinics c\n  LEFT JOIN wellness.domains d ON d.clinic_id = c.id\n  LEFT JOIN wellness.serp_results sr ON sr.domain_id = d.id\n  LEFT JOIN wellness.serp_snapshots ss ON sr.snapshot_id = ss.id AND ss.captured_at >= NOW() - INTERVAL '30 days'\n  LEFT JOIN wellness.search_queries sq ON ss.query_id = sq.id\n  WHERE sr.rank_position IS NULL OR (sr.rank_position <= 10 AND sr.block_type IN ('organic', 'local_pack'))\n  GROUP BY d.clinic_id, c.vertical_id, c.id\n),\nvertical_bounds AS (\n  SELECT \n    vertical_id,\n    MIN(NULLIF(raw_score, 0)) as min_score,\n    MAX(raw_score) as max_score\n  FROM visibility_raw\n  WHERE raw_score > 0\n  GROUP BY vertical_id\n),\nvisibility_scores AS (\n  SELECT \n    vr.clinic_id,\n    vr.raw_score as visibility_raw,\n    CASE \n      WHEN vr.raw_score = 0 THEN 0\n      WHEN vb.max_score IS NULL OR vb.max_score = COALESCE(vb.min_score, 0) THEN 50\n      ELSE ROUND((100.0 * (vr.raw_score - COALESCE(vb.min_score, 0)) / NULLIF(vb.max_score - COALESCE(vb.min_score, 0), 0))::NUMERIC, 2)\n    END as visibility_score,\n    COALESCE(vb.min_score, 0) as vertical_min,\n    COALESCE(vb.max_score, 0) as vertical_max,\n    vr.tier_a_appearances,\n    vr.tier_b_appearances,\n    vr.local_pack_appearances\n  FROM visibility_raw vr\n  LEFT JOIN vertical_bounds vb ON vr.vertical_id = vb.vertical_id\n),\n\n-- Inventory scores (log curve + breadth bonus)\ninventory_data AS (\n  SELECT \n    c.id as clinic_id,\n    COALESCE(cp.contentful_pages, 0) as contentful_pages,\n    COALESCE(cp.page_types, ARRAY[]::text[]) as page_types\n  FROM wellness.clinics c\n  LEFT JOIN (\n    SELECT \n      d.clinic_id,\n      COUNT(*) FILTER (WHERE pc.word_count >= 100) as contentful_pages,\n      ARRAY_AGG(DISTINCT p.page_type) FILTER (WHERE p.page_type IS NOT NULL) as page_types\n    FROM wellness.domains d\n    JOIN wellness.pages p ON p.domain_id = d.id\n    LEFT JOIN wellness.page_content pc ON pc.page_id = p.id\n    WHERE d.clinic_id IS NOT NULL\n    GROUP BY d.clinic_id\n  ) cp ON cp.clinic_id = c.id\n),\ninventory_scores AS (\n  SELECT \n    clinic_id,\n    contentful_pages,\n    page_types,\n    ROUND((40 * LN(1 + LEAST(contentful_pages, 50)) / LN(51))::NUMERIC, 2) as base_score,\n    CASE WHEN 'service' = ANY(page_types) THEN 20 ELSE 0 END +\n    CASE WHEN 'pricing' = ANY(page_types) THEN 20 ELSE 0 END +\n    CASE WHEN 'contact' = ANY(page_types) THEN 10 ELSE 0 END +\n    CASE WHEN 'about' = ANY(page_types) THEN 5 ELSE 0 END as breadth_bonus,\n    LEAST(100,\n      ROUND((40 * LN(1 + LEAST(contentful_pages, 50)) / LN(51))::NUMERIC, 2) +\n      CASE WHEN 'service' = ANY(page_types) THEN 20 ELSE 0 END +\n      CASE WHEN 'pricing' = ANY(page_types) THEN 20 ELSE 0 END +\n      CASE WHEN 'contact' = ANY(page_types) THEN 10 ELSE 0 END +\n      CASE WHEN 'about' = ANY(page_types) THEN 5 ELSE 0 END\n    ) as inventory_score\n  FROM inventory_data\n),\n\n-- Conversion scores (WhatsApp from CTAs, others from og_data)\nconversion_data AS (\n  SELECT \n    c.id as clinic_id,\n    EXISTS(SELECT 1 FROM wellness.clinic_ctas WHERE clinic_id = c.id AND cta_type = 'whatsapp' AND LENGTH(evidence_snippet) >= 50) as has_whatsapp,\n    COALESCE(og.has_booking, false) as has_booking,\n    COALESCE(og.has_phone, false) as has_phone,\n    COALESCE(og.has_form, false) as has_form,\n    COALESCE(og.has_email, false) as has_email\n  FROM wellness.clinics c\n  LEFT JOIN (\n    SELECT \n      d.clinic_id,\n      bool_or((ps.og_data->>'booking_provider') IS NOT NULL) as has_booking,\n      bool_or(COALESCE((ps.og_data->>'has_tel')::boolean, false)) as has_phone,\n      bool_or(COALESCE((ps.og_data->>'has_form')::boolean, false)) as has_form,\n      bool_or(COALESCE((ps.og_data->>'has_mailto')::boolean, false)) as has_email\n    FROM wellness.page_seo ps\n    JOIN wellness.pages p ON ps.page_id = p.id\n    JOIN wellness.domains d ON p.domain_id = d.id\n    WHERE d.clinic_id IS NOT NULL AND p.page_type IN ('service', 'pricing', 'contact')\n    GROUP BY d.clinic_id\n  ) og ON og.clinic_id = c.id\n),\nconversion_scores AS (\n  SELECT \n    clinic_id,\n    has_whatsapp, has_booking, has_phone, has_form, has_email,\n    LEAST(100,\n      CASE WHEN has_whatsapp THEN 30 ELSE 0 END +\n      CASE WHEN has_booking THEN 30 ELSE 0 END +\n      CASE WHEN has_phone THEN 20 ELSE 0 END +\n      CASE WHEN has_form THEN 10 ELSE 0 END +\n      CASE WHEN has_email THEN 10 ELSE 0 END\n    ) as conversion_score\n  FROM conversion_data\n),\n\n-- Commercial scores\ncommercial_data AS (\n  SELECT \n    c.id as clinic_id,\n    COALESCE(o.offer_count, 0) as offer_count,\n    COALESCE(ct.cta_count, 0) as cta_count,\n    COALESCE(o.has_pricing_evidence, false) as has_pricing_evidence\n  FROM wellness.clinics c\n  LEFT JOIN (\n    SELECT clinic_id, COUNT(*) as offer_count, bool_or(price_value IS NOT NULL) as has_pricing_evidence\n    FROM wellness.clinic_offers\n    WHERE evidence_snippet IS NOT NULL AND price_value BETWEEN 5 AND 5000\n    GROUP BY clinic_id\n  ) o ON o.clinic_id = c.id\n  LEFT JOIN (\n    SELECT clinic_id, COUNT(*) as cta_count\n    FROM wellness.clinic_ctas\n    WHERE LENGTH(evidence_snippet) >= 50\n    GROUP BY clinic_id\n  ) ct ON ct.clinic_id = c.id\n),\ncommercial_scores AS (\n  SELECT \n    clinic_id, offer_count, cta_count, has_pricing_evidence,\n    LEAST(100,\n      CASE WHEN offer_count >= 1 THEN 50 ELSE 0 END +\n      CASE WHEN cta_count >= 1 THEN 30 ELSE 0 END +\n      CASE WHEN has_pricing_evidence THEN 20 ELSE 0 END\n    ) as commercial_score\n  FROM commercial_data\n),\n\n-- Technical scores\ntechnical_data AS (\n  SELECT \n    c.id as clinic_id,\n    COALESCE(t.has_local_business_schema, false) as has_local_business_schema,\n    COALESCE(t.has_structured_data, false) as has_structured_data,\n    COALESCE(t.no_indexation_issues, true) as no_indexation_issues,\n    COALESCE(t.has_canonical, false) as has_canonical,\n    COALESCE(t.has_og_tags, false) as has_og_tags\n  FROM wellness.clinics c\n  LEFT JOIN (\n    SELECT \n      d.clinic_id,\n      bool_or('LocalBusiness' = ANY(ps.schema_types) OR 'MedicalBusiness' = ANY(ps.schema_types)) as has_local_business_schema,\n      bool_or(ps.schema_types IS NOT NULL AND array_length(ps.schema_types, 1) > 0) as has_structured_data,\n      bool_and(NOT COALESCE((ps.og_data->>'robots_meta') ILIKE '%noindex%', false)) as no_indexation_issues,\n      bool_or(ps.canonical_url IS NOT NULL) as has_canonical,\n      bool_or(ps.og_data IS NOT NULL) as has_og_tags\n    FROM wellness.page_seo ps\n    JOIN wellness.pages p ON ps.page_id = p.id\n    JOIN wellness.domains d ON p.domain_id = d.id\n    WHERE d.clinic_id IS NOT NULL AND p.page_type IN ('service', 'pricing', 'contact', 'about')\n    GROUP BY d.clinic_id\n  ) t ON t.clinic_id = c.id\n),\ntechnical_scores AS (\n  SELECT \n    clinic_id, has_local_business_schema, has_structured_data, no_indexation_issues, has_canonical, has_og_tags,\n    LEAST(100,\n      CASE WHEN has_local_business_schema THEN 40 ELSE 0 END +\n      CASE WHEN has_structured_data THEN 20 ELSE 0 END +\n      CASE WHEN no_indexation_issues THEN 20 ELSE 0 END +\n      CASE WHEN has_canonical THEN 10 ELSE 0 END +\n      CASE WHEN has_og_tags THEN 10 ELSE 0 END\n    ) as technical_score\n  FROM technical_data\n),\n\n-- Completeness scores\ncompleteness_data AS (\n  SELECT \n    c.id as clinic_id,\n    COALESCE((SELECT COUNT(*) FROM wellness.pages p JOIN wellness.domains d ON p.domain_id = d.id JOIN wellness.page_content pc ON pc.page_id = p.id WHERE d.clinic_id = c.id AND pc.word_count >= 100), 0) as contentful_pages,\n    COALESCE((SELECT COUNT(DISTINCT ps.page_id) FROM wellness.page_seo ps JOIN wellness.pages p ON ps.page_id = p.id JOIN wellness.domains d ON p.domain_id = d.id WHERE d.clinic_id = c.id), 0) as seo_pages,\n    COALESCE((SELECT COUNT(*) FROM wellness.clinic_offers WHERE clinic_id = c.id AND evidence_snippet IS NOT NULL), 0) as offer_count,\n    COALESCE((SELECT COUNT(*) FROM wellness.clinic_ctas WHERE clinic_id = c.id AND LENGTH(evidence_snippet) >= 50), 0) as quality_ctas,\n    COALESCE((SELECT COUNT(*) FROM wellness.clinic_keywords WHERE clinic_id = c.id), 0) as keyword_count\n  FROM wellness.clinics c\n),\ncompleteness_scores AS (\n  SELECT \n    clinic_id, contentful_pages, seo_pages, offer_count, quality_ctas, keyword_count,\n    LEAST(100, (\n      CASE WHEN contentful_pages >= 3 THEN 25 ELSE contentful_pages * 8 END +\n      CASE WHEN seo_pages >= 3 THEN 20 ELSE seo_pages * 7 END +\n      CASE WHEN offer_count >= 1 THEN 20 ELSE 0 END +\n      CASE WHEN quality_ctas >= 1 THEN 20 ELSE 0 END +\n      CASE WHEN keyword_count >= 10 THEN 15 ELSE (keyword_count * 1.5)::INTEGER END\n    )) as score_confidence\n  FROM completeness_data\n)\n\n-- Final aggregation\nSELECT \n  c.id as clinic_id,\n  c.name as clinic_name,\n  c.vertical_id,\n  -- Component scores\n  COALESCE(vs.visibility_score, 0) as visibility_score,\n  COALESCE(vs.visibility_raw, 0) as visibility_raw,\n  COALESCE(vs.vertical_min, 0) as vertical_min,\n  COALESCE(vs.vertical_max, 0) as vertical_max,\n  COALESCE(vs.tier_a_appearances, 0) as tier_a_appearances,\n  COALESCE(vs.tier_b_appearances, 0) as tier_b_appearances,\n  COALESCE(vs.local_pack_appearances, 0) as local_pack_appearances,\n  COALESCE(inv.inventory_score, 0) as inventory_score,\n  COALESCE(inv.contentful_pages, 0) as contentful_pages,\n  COALESCE(inv.page_types, ARRAY[]::text[]) as page_types,\n  COALESCE(inv.breadth_bonus, 0) as breadth_bonus,\n  COALESCE(con.conversion_score, 0) as conversion_score,\n  COALESCE(con.has_whatsapp, false) as has_whatsapp,\n  COALESCE(con.has_booking, false) as has_booking,\n  COALESCE(con.has_phone, false) as has_phone,\n  COALESCE(con.has_form, false) as has_form,\n  COALESCE(com.commercial_score, 0) as commercial_score,\n  COALESCE(com.offer_count, 0) as offer_count,\n  COALESCE(com.cta_count, 0) as cta_count,\n  COALESCE(com.has_pricing_evidence, false) as has_pricing_evidence,\n  COALESCE(tec.technical_score, 0) as technical_score,\n  COALESCE(tec.has_local_business_schema, false) as has_local_business_schema,\n  COALESCE(tec.has_structured_data, false) as has_structured_data,\n  COALESCE(tec.no_indexation_issues, true) as no_indexation_issues,\n  COALESCE(cmp.score_confidence, 0) as score_confidence,\n  -- Final weighted score\n  ROUND((\n    0.35 * COALESCE(vs.visibility_score, 0) +\n    0.25 * COALESCE(inv.inventory_score, 0) +\n    0.20 * COALESCE(con.conversion_score, 0) +\n    0.15 * COALESCE(com.commercial_score, 0) +\n    0.05 * COALESCE(tec.technical_score, 0)\n  )::NUMERIC) as competitor_score\nFROM wellness.clinics c\nLEFT JOIN visibility_scores vs ON vs.clinic_id = c.id\nLEFT JOIN inventory_scores inv ON inv.clinic_id = c.id\nLEFT JOIN conversion_scores con ON con.clinic_id = c.id\nLEFT JOIN commercial_scores com ON com.clinic_id = c.id\nLEFT JOIN technical_scores tec ON tec.clinic_id = c.id\nLEFT JOIN completeness_scores cmp ON cmp.clinic_id = c.id;"
+            },
+            "id": "w7-compute-all",
+            "name": "Compute All Scores",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.6,
+            "position": [
+                300,
+                500
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "postgres-creds-id",
+                    "name": "Postgres account"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "jsCode": "// Build score breakdown JSON and prepare for update\nconst items = $input.all();\nconst results = [];\n\nfor (const item of items) {\n  const data = item.json;\n  \n  // Build top signals\n  const topSignals = [];\n  if (data.tier_a_appearances > 0) {\n    topSignals.push(`Appears in ${data.tier_a_appearances} Tier A SERP queries`);\n  }\n  if (data.has_whatsapp) {\n    topSignals.push('WhatsApp CTA with quality evidence');\n  }\n  if (data.page_types && data.page_types.includes('pricing')) {\n    topSignals.push('Has pricing page');\n  }\n  if (data.has_local_business_schema) {\n    topSignals.push('Uses LocalBusiness schema');\n  }\n  if (data.offer_count > 0) {\n    topSignals.push(`${data.offer_count} offers with evidence`);\n  }\n\n  // Build score breakdown JSON\n  const scoreBreakdown = {\n    visibility: {\n      normalized: parseFloat(data.visibility_score) || 0,\n      raw: parseFloat(data.visibility_raw) || 0,\n      vertical_min: parseFloat(data.vertical_min) || 0,\n      vertical_max: parseFloat(data.vertical_max) || 0,\n      tier_a_appearances: data.tier_a_appearances || 0,\n      tier_b_appearances: data.tier_b_appearances || 0,\n      local_pack_appearances: data.local_pack_appearances || 0\n    },\n    inventory: {\n      score: parseFloat(data.inventory_score) || 0,\n      contentful_pages: data.contentful_pages || 0,\n      page_types: data.page_types || [],\n      breadth_bonus: parseFloat(data.breadth_bonus) || 0\n    },\n    conversion: {\n      score: parseFloat(data.conversion_score) || 0,\n      whatsapp: data.has_whatsapp || false,\n      booking: data.has_booking || false,\n      phone: data.has_phone || false,\n      form: data.has_form || false\n    },\n    commercial: {\n      score: parseFloat(data.commercial_score) || 0,\n      offer_count: data.offer_count || 0,\n      cta_count: data.cta_count || 0,\n      has_pricing_evidence: data.has_pricing_evidence || false\n    },\n    technical: {\n      score: parseFloat(data.technical_score) || 0,\n      has_local_business_schema: data.has_local_business_schema || false,\n      has_structured_data: data.has_structured_data || false,\n      no_indexation_issues: data.no_indexation_issues || false\n    },\n    completeness: parseFloat(data.score_confidence) || 0,\n    top_signals: topSignals.slice(0, 5),\n    scored_at: new Date().toISOString()\n  };\n\n  results.push({\n    json: {\n      clinic_id: data.clinic_id,\n      clinic_name: data.clinic_name,\n      competitor_score: parseInt(data.competitor_score) || 0,\n      score_confidence: parseFloat(data.score_confidence) || 0,\n      score_breakdown: JSON.stringify(scoreBreakdown)\n    }\n  });\n}\n\nreturn results;"
+            },
+            "id": "w7-build-breakdown",
+            "name": "Build Breakdown",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                500,
+                500
+            ]
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "UPDATE wellness.clinics\nSET \n  competitor_score = {{ $json.competitor_score }},\n  score_confidence = {{ $json.score_confidence }},\n  score_breakdown = '{{ $json.score_breakdown }}'::jsonb,\n  scored_at = NOW(),\n  updated_at = NOW()\nWHERE id = '{{ $json.clinic_id }}'::uuid\nRETURNING id, name, competitor_score, score_confidence;"
+            },
+            "id": "w7-update",
+            "name": "Update Clinics",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.6,
+            "position": [
+                700,
+                500
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "postgres-creds-id",
+                    "name": "Postgres account"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "jsCode": "// Generate summary of scoring run\nconst items = $input.all();\nconst clinicsScored = items.length;\n\n// Parse numbers properly (they come as strings from DB)\nconst avgScore = items.length > 0 \n  ? Math.round(items.reduce((sum, i) => sum + (parseFloat(i.json.competitor_score) || 0), 0) / items.length)\n  : 0;\nconst avgConfidence = items.length > 0\n  ? Math.round(items.reduce((sum, i) => sum + (parseFloat(i.json.score_confidence) || 0), 0) / items.length)\n  : 0;\n\n// Top 10 by score (parse to compare numbers, not strings)\nconst top10 = items\n  .sort((a, b) => (parseFloat(b.json.competitor_score) || 0) - (parseFloat(a.json.competitor_score) || 0))\n  .slice(0, 10)\n  .map(i => ({\n    name: i.json.name,\n    score: parseFloat(i.json.competitor_score) || 0,\n    confidence: parseFloat(i.json.score_confidence) || 0\n  }));\n\n// Low confidence (potential issues)\nconst lowConfidence = items\n  .filter(i => (parseFloat(i.json.score_confidence) || 0) < 30 && (parseFloat(i.json.competitor_score) || 0) > 0)\n  .slice(0, 5)\n  .map(i => ({\n    name: i.json.name,\n    score: parseFloat(i.json.competitor_score) || 0,\n    confidence: parseFloat(i.json.score_confidence) || 0\n  }));\n\nreturn [{\n  json: {\n    success: true,\n    clinics_scored: clinicsScored,\n    avg_competitor_score: avgScore,\n    avg_confidence: avgConfidence,\n    top_10_clinics: top10,\n    low_confidence_alerts: lowConfidence,\n    scored_at: new Date().toISOString()\n  }\n}];"
+            },
+            "id": "w7-summary",
+            "name": "Summary",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                900,
+                500
+            ]
+        }
+    ],
+    "connections": {
+        "Manual Trigger": {
+            "main": [
+                [
+                    {
+                        "node": "Compute All Scores",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Compute All Scores": {
+            "main": [
+                [
+                    {
+                        "node": "Build Breakdown",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Build Breakdown": {
+            "main": [
+                [
+                    {
+                        "node": "Update Clinics",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Update Clinics": {
+            "main": [
+                [
+                    {
+                        "node": "Summary",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        }
+    },
+    "settings": {
+        "executionOrder": "v1"
+    },
+    "active": false
+}

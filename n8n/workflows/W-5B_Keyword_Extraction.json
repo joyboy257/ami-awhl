@@ -1,0 +1,236 @@
+{
+    "name": "W-5B: Keyword Extraction",
+    "nodes": [
+        {
+            "parameters": {},
+            "id": "w5b-trigger",
+            "name": "Manual Trigger",
+            "type": "n8n-nodes-base.manualTrigger",
+            "typeVersion": 1,
+            "position": [
+                100,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "SELECT pc.id as content_id, pc.page_id, pc.content_hash, pc.markdown, pc.word_count,\n       p.url, p.page_type, d.domain, d.clinic_id\nFROM wellness.page_content pc\nJOIN wellness.pages p ON pc.page_id = p.id\nJOIN wellness.domains d ON p.domain_id = d.id\nWHERE NOT EXISTS (\n  SELECT 1 FROM wellness.page_keywords pk \n  WHERE pk.page_id = pc.page_id\n)\nAND pc.word_count > 50\nLIMIT 30;"
+            },
+            "id": "w5b-get-content",
+            "name": "Get Unprocessed Content",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.6,
+            "position": [
+                300,
+                300
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "postgres-creds-id",
+                    "name": "Postgres account"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "batchSize": 5,
+                "options": {}
+            },
+            "id": "w5b-split",
+            "name": "Split Content",
+            "type": "n8n-nodes-base.splitInBatches",
+            "typeVersion": 3,
+            "position": [
+                500,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "jsCode": "// Extract keywords using TF-style frequency analysis\n// This is the 'cheap' pass - no AI needed\n\nconst data = $input.item.json;\nconst markdown = (data.markdown || '').toLowerCase();\nconst pageType = data.page_type || 'unknown';\n\n// Stopwords to filter out\nconst stopwords = new Set([\n  'the', 'be', 'to', 'of', 'and', 'a', 'in', 'that', 'have', 'i',\n  'it', 'for', 'not', 'on', 'with', 'he', 'as', 'you', 'do', 'at',\n  'this', 'but', 'his', 'by', 'from', 'they', 'we', 'say', 'her', 'she',\n  'or', 'an', 'will', 'my', 'one', 'all', 'would', 'there', 'their', 'what',\n  'so', 'up', 'out', 'if', 'about', 'who', 'get', 'which', 'go', 'me',\n  'when', 'make', 'can', 'like', 'time', 'no', 'just', 'him', 'know', 'take',\n  'people', 'into', 'year', 'your', 'good', 'some', 'could', 'them', 'see', 'other',\n  'than', 'then', 'now', 'look', 'only', 'come', 'its', 'over', 'think', 'also',\n  'back', 'after', 'use', 'two', 'how', 'our', 'work', 'first', 'well', 'way',\n  'even', 'new', 'want', 'because', 'any', 'these', 'give', 'day', 'most', 'us',\n  'is', 'are', 'was', 'were', 'been', 'being', 'has', 'had', 'does', 'did',\n  'more', 'very', 'here', 'such', 'singapore', 'www', 'com', 'http', 'https',\n  'click', 'read', 'learn', 'contact', 'home', 'menu', 'page', 'site', 'website'\n]);\n\n// Clean and tokenize text\nconst cleanText = markdown\n  .replace(/[^a-z\\s]/g, ' ')\n  .replace(/\\s+/g, ' ')\n  .trim();\n\nconst words = cleanText.split(' ').filter(w => \n  w.length >= 3 && \n  w.length <= 30 && \n  !stopwords.has(w) &&\n  !/^\\d+$/.test(w)\n);\n\n// Count word frequencies\nconst freq = {};\nfor (const word of words) {\n  freq[word] = (freq[word] || 0) + 1;\n}\n\n// Get top keywords by frequency\nconst sortedTerms = Object.entries(freq)\n  .sort((a, b) => b[1] - a[1])\n  .slice(0, 20);\n\n// Calculate scores (normalized by document length)\nconst totalWords = words.length || 1;\nconst keywords = sortedTerms.map(([term, count]) => ({\n  term: term,\n  score: Math.round((count / totalWords) * 1000) / 1000, // TF score\n  count: count\n}));\n\n// Extract 2-grams for multi-word keywords\nconst bigrams = [];\nfor (let i = 0; i < words.length - 1; i++) {\n  const bigram = words[i] + ' ' + words[i + 1];\n  if (!stopwords.has(words[i]) && !stopwords.has(words[i + 1])) {\n    bigrams.push(bigram);\n  }\n}\n\nconst bigramFreq = {};\nfor (const bg of bigrams) {\n  bigramFreq[bg] = (bigramFreq[bg] || 0) + 1;\n}\n\nconst topBigrams = Object.entries(bigramFreq)\n  .filter(([bg, count]) => count >= 2)\n  .sort((a, b) => b[1] - a[1])\n  .slice(0, 10)\n  .map(([term, count]) => ({\n    term: term,\n    score: Math.round((count / totalWords) * 1000) / 1000,\n    count: count\n  }));\n\n// Combine single words and bigrams\nconst allKeywords = [...keywords, ...topBigrams];\n\nreturn [{ json: {\n  page_id: data.page_id,\n  content_hash: data.content_hash,\n  url: data.url,\n  domain: data.domain,\n  clinic_id: data.clinic_id,\n  page_type: pageType,\n  keywords: allKeywords,\n  extraction_method: 'tfidf'\n}}];"
+            },
+            "id": "w5b-extract",
+            "name": "Extract Keywords (TF)",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                700,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "jsCode": "// Prepare batch insert for keywords\nconst data = $input.item.json;\nconst keywords = data.keywords || [];\n\nif (keywords.length === 0) {\n  return [{ json: { page_id: data.page_id, skipped: true, reason: 'no_keywords' } }];\n}\n\n// Return array of keyword items for batch insert\nreturn keywords.map(kw => ({ json: {\n  page_id: data.page_id,\n  term: kw.term,\n  score: kw.score,\n  extraction_method: data.extraction_method,\n  domain: data.domain,\n  clinic_id: data.clinic_id\n}}));"
+            },
+            "id": "w5b-prep-insert",
+            "name": "Prep Keywords",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                900,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "INSERT INTO wellness.page_keywords (page_id, term, score, extraction_method)\nVALUES (\n  '{{ $json.page_id }}'::uuid,\n  '{{ $json.term.replace(/'/g, \"''\").substring(0, 200) }}',\n  {{ $json.score || 0 }},\n  '{{ $json.extraction_method }}'\n)\nON CONFLICT (page_id, term) DO UPDATE SET\n  score = GREATEST(wellness.page_keywords.score, EXCLUDED.score),\n  extraction_method = EXCLUDED.extraction_method\nRETURNING id, page_id, term;"
+            },
+            "id": "w5b-store",
+            "name": "Store Keywords",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.6,
+            "position": [
+                1100,
+                300
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "postgres-creds-id",
+                    "name": "Postgres account"
+                }
+            },
+            "continueOnFail": true
+        },
+        {
+            "parameters": {
+                "aggregate": "aggregateAllItemData",
+                "options": {}
+            },
+            "id": "w5b-aggregate",
+            "name": "Aggregate",
+            "type": "n8n-nodes-base.aggregate",
+            "typeVersion": 1,
+            "position": [
+                1300,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "jsCode": "// Continue to next batch\nreturn [{ json: { batch_processed: true } }];"
+            },
+            "id": "w5b-continue",
+            "name": "Continue",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1500,
+                300
+            ]
+        },
+        {
+            "parameters": {},
+            "id": "w5b-done",
+            "name": "Done",
+            "type": "n8n-nodes-base.noOp",
+            "typeVersion": 1,
+            "position": [
+                700,
+                450
+            ]
+        }
+    ],
+    "connections": {
+        "Manual Trigger": {
+            "main": [
+                [
+                    {
+                        "node": "Get Unprocessed Content",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Get Unprocessed Content": {
+            "main": [
+                [
+                    {
+                        "node": "Split Content",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Split Content": {
+            "main": [
+                [
+                    {
+                        "node": "Extract Keywords (TF)",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                [
+                    {
+                        "node": "Done",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Extract Keywords (TF)": {
+            "main": [
+                [
+                    {
+                        "node": "Prep Keywords",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Prep Keywords": {
+            "main": [
+                [
+                    {
+                        "node": "Store Keywords",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Store Keywords": {
+            "main": [
+                [
+                    {
+                        "node": "Aggregate",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Aggregate": {
+            "main": [
+                [
+                    {
+                        "node": "Continue",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Continue": {
+            "main": [
+                [
+                    {
+                        "node": "Split Content",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        }
+    },
+    "settings": {
+        "executionOrder": "v1"
+    },
+    "active": false
+}

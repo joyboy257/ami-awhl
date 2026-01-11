@@ -1,0 +1,190 @@
+{
+    "name": "W-5A: SEO Extraction",
+    "nodes": [
+        {
+            "parameters": {},
+            "id": "w5a-trigger",
+            "name": "Manual Trigger",
+            "type": "n8n-nodes-base.manualTrigger",
+            "typeVersion": 1,
+            "position": [
+                100,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "SELECT pc.id as content_id, pc.page_id, pc.content_hash, pc.markdown, pc.html_body, p.url, d.domain\nFROM wellness.page_content pc\nJOIN wellness.pages p ON pc.page_id = p.id\nJOIN wellness.domains d ON p.domain_id = d.id\nWHERE pc.html_body IS NOT NULL\n  AND LENGTH(pc.html_body) > 500\n  AND pc.html_body NOT LIKE '%<urlset%'\n  AND pc.html_body NOT LIKE '%<sitemapindex%'\n  AND NOT EXISTS (\n    SELECT 1 FROM wellness.page_seo ps \n    WHERE ps.page_id = pc.page_id AND ps.content_hash = pc.content_hash\n  )\nLIMIT 50;"
+            },
+            "id": "w5a-get-content",
+            "name": "Get Unprocessed Content",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.6,
+            "position": [
+                300,
+                300
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "postgres-creds-id",
+                    "name": "Postgres account"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "batchSize": 5,
+                "options": {}
+            },
+            "id": "w5a-split",
+            "name": "Split Content",
+            "type": "n8n-nodes-base.splitInBatches",
+            "typeVersion": 3,
+            "position": [
+                500,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "jsCode": "// ===== W-5A BATTLECARD-READY SEO EXTRACTION =====\nconst data = $input.item.json;\nconst html = (data.html_body || '').substring(0, 200000); // Cap at 200KB\nconst url = data.url || '';\nconst domain = data.domain || '';\n\n// === HELPER FUNCTIONS ===\nfunction extractTagContent(htmlStr, tag) {\n  const regex = new RegExp('<' + tag + '[^>]*>([\\\\s\\\\S]*?)</' + tag + '>', 'i');\n  const match = htmlStr.match(regex);\n  return match ? match[1].replace(/<[^>]+>/g, '').trim() : '';\n}\n\nfunction extractMeta(htmlStr, name) {\n  // Try name=\"X\" content=\"Y\"\n  let match = htmlStr.match(new RegExp('<meta[^>]*name=[\"\\']' + name + '[\"\\'][^>]*content=[\"\\']([^\"\\']*)[\"\\']+', 'i'));\n  if (!match) {\n    // Try content=\"Y\" name=\"X\"\n    match = htmlStr.match(new RegExp('<meta[^>]*content=[\"\\']([^\"\\']*)[\"\\']+[^>]*name=[\"\\']' + name + '[\"\\']', 'i'));\n  }\n  return match ? match[1].trim() : '';\n}\n\nfunction extractOG(htmlStr, property) {\n  let match = htmlStr.match(new RegExp('<meta[^>]*property=[\"\\']' + property + '[\"\\'][^>]*content=[\"\\']([^\"\\']*)[\"\\']+', 'i'));\n  if (!match) {\n    match = htmlStr.match(new RegExp('<meta[^>]*content=[\"\\']([^\"\\']*)[\"\\']+[^>]*property=[\"\\']' + property + '[\"\\']', 'i'));\n  }\n  return match ? match[1].trim() : '';\n}\n\n// === 1. BASIC SEO METADATA ===\nlet title = extractTagContent(html, 'title') || extractOG(html, 'og:title') || '';\nlet metaDescription = extractMeta(html, 'description') || extractOG(html, 'og:description') || '';\n\n// Canonical URL - only default to page URL if truly missing\nlet canonicalUrl = '';\nlet canonicalMissing = true;\nconst canMatch = html.match(/<link[^>]*rel=[\"']canonical[\"'][^>]*href=[\"']([^\"']*)[\"']/i) ||\n                 html.match(/<link[^>]*href=[\"']([^\"']*)[\"'][^>]*rel=[\"']canonical[\"']/i);\nif (canMatch && canMatch[1]) {\n  canonicalUrl = canMatch[1].trim();\n  canonicalMissing = false;\n} else {\n  canonicalUrl = url; // Fallback only if truly absent\n}\n\n// H1 extraction\nconst h1Match = html.match(/<h1[^>]*>([\\s\\S]*?)<\\/h1>/i);\nconst h1 = h1Match ? h1Match[1].replace(/<[^>]+>/g, '').trim() : '';\n\n// === 2. INDEXATION SIGNALS ===\nconst robotsMeta = extractMeta(html, 'robots') || '';\nconst noindex = robotsMeta.toLowerCase().includes('noindex');\nconst nofollow = robotsMeta.toLowerCase().includes('nofollow');\n\n// Hreflang detection\nconst hreflangMatches = html.match(/<link[^>]*hreflang=[\"']([^\"']*)[\"'][^>]*>/gi) || [];\nconst hreflangLocales = [...new Set(hreflangMatches.map(m => {\n  const match = m.match(/hreflang=[\"']([^\"']*)[\"']/i);\n  return match ? match[1] : null;\n}).filter(Boolean))];\nconst hreflangPresent = hreflangLocales.length > 0;\n\n// === 3. JSON-LD SCHEMA PARSING ===\nconst schemaTypes = [];\nconst schemaData = {};\nconst jsonLdBlocks = html.match(/<script[^>]*type=[\"']application\\/ld\\+json[\"'][^>]*>([\\s\\S]*?)<\\/script>/gi) || [];\n\nfor (const block of jsonLdBlocks) {\n  try {\n    const jsonContent = block.replace(/<script[^>]*>/i, '').replace(/<\\/script>/i, '').trim();\n    const parsed = JSON.parse(jsonContent);\n    \n    function extractTypes(obj) {\n      if (!obj) return;\n      if (Array.isArray(obj)) {\n        obj.forEach(extractTypes);\n      } else if (typeof obj === 'object') {\n        if (obj['@type']) {\n          const types = Array.isArray(obj['@type']) ? obj['@type'] : [obj['@type']];\n          types.forEach(t => { if (!schemaTypes.includes(t)) schemaTypes.push(t); });\n        }\n        // Extract key business fields\n        if (obj.name && !schemaData.name) schemaData.name = obj.name;\n        if (obj.telephone && !schemaData.telephone) schemaData.telephone = obj.telephone;\n        if (obj.address) schemaData.address = typeof obj.address === 'string' ? obj.address : obj.address.streetAddress || JSON.stringify(obj.address);\n        if (obj.sameAs) schemaData.sameAs = Array.isArray(obj.sameAs) ? obj.sameAs.slice(0, 5) : [obj.sameAs];\n        if (obj.aggregateRating) {\n          schemaData.ratingValue = obj.aggregateRating.ratingValue;\n          schemaData.reviewCount = obj.aggregateRating.reviewCount;\n        }\n        if (obj.openingHours) schemaData.openingHours = Array.isArray(obj.openingHours) ? obj.openingHours : [obj.openingHours];\n        if (obj.offers) schemaData.hasOffers = true;\n        if (obj['@graph']) extractTypes(obj['@graph']);\n      }\n    }\n    extractTypes(parsed);\n  } catch (e) { /* ignore malformed JSON-LD */ }\n}\n\n// === 4. LINK COUNTING (domain-aware) ===\nconst allHrefs = html.match(/href=[\"']([^\"']+)[\"']/gi) || [];\nlet internalCount = 0;\nlet externalCount = 0;\nconst internalTargets = {};\n\nfor (const href of allHrefs) {\n  const urlMatch = href.match(/href=[\"']([^\"']+)[\"']/i);\n  if (!urlMatch) continue;\n  const linkUrl = urlMatch[1];\n  \n  // Skip anchor-only, javascript, mailto, tel\n  if (linkUrl.startsWith('#') || linkUrl.startsWith('javascript:') || \n      linkUrl.startsWith('mailto:') || linkUrl.startsWith('tel:')) continue;\n  \n  try {\n    let isInternal = false;\n    if (linkUrl.startsWith('/') || linkUrl.startsWith('./') || linkUrl.startsWith('../')) {\n      isInternal = true;\n    } else if (linkUrl.startsWith('http')) {\n      const linkHost = new URL(linkUrl).hostname;\n      isInternal = linkHost === domain || linkHost.endsWith('.' + domain);\n    }\n    \n    if (isInternal) {\n      internalCount++;\n      // Track internal link targets\n      let path = linkUrl.startsWith('http') ? new URL(linkUrl).pathname : linkUrl.split('?')[0];\n      if (path && path !== '/') {\n        internalTargets[path] = (internalTargets[path] || 0) + 1;\n      }\n    } else {\n      externalCount++;\n    }\n  } catch (e) { /* ignore malformed URLs */ }\n}\n\n// Top 10 internal link targets\nconst topInternalLinks = Object.entries(internalTargets)\n  .sort((a, b) => b[1] - a[1])\n  .slice(0, 10)\n  .map(([path, count]) => ({ path, count }));\n\n// === 5. CONVERSION SIGNALS ===\nconst hasWhatsapp = /wa\\.me|api\\.whatsapp\\.com/i.test(html);\nconst hasTel = /href=[\"']tel:/i.test(html);\nconst hasMailto = /href=[\"']mailto:/i.test(html);\nconst hasForm = /<form[\\s>]/i.test(html);\n\n// Booking platforms\nconst bookingPatterns = {\n  calendly: /calendly\\.com/i,\n  fresha: /fresha\\.com/i,\n  mindbody: /mindbody|mindbodyonline\\.com/i,\n  acuity: /acuityscheduling\\.com/i,\n  booksy: /booksy\\.com/i,\n  setmore: /setmore\\.com/i,\n  simplybook: /simplybook\\.me/i\n};\nlet bookingPlatform = null;\nfor (const [name, pattern] of Object.entries(bookingPatterns)) {\n  if (pattern.test(html)) { bookingPlatform = name; break; }\n}\n\n// Chat widgets\nconst chatPatterns = {\n  tawk: /tawk\\.to/i,\n  intercom: /intercom/i,\n  drift: /drift\\.com/i,\n  crisp: /crisp\\.chat/i,\n  zendesk: /zendesk|zopim/i,\n  freshchat: /freshchat/i,\n  hubspot: /hubspot.*chat/i\n};\nlet chatWidget = null;\nfor (const [name, pattern] of Object.entries(chatPatterns)) {\n  if (pattern.test(html)) { chatWidget = name; break; }\n}\n\n// === 6. CONTENT STRUCTURE SIGNALS ===\nconst h1Count = (html.match(/<h1[\\s>]/gi) || []).length;\nconst h2Count = (html.match(/<h2[\\s>]/gi) || []).length;\nconst h3Count = (html.match(/<h3[\\s>]/gi) || []).length;\n\n// Extract first 10 H2s\nconst h2Matches = html.match(/<h2[^>]*>([\\s\\S]*?)<\\/h2>/gi) || [];\nconst topH2List = h2Matches.slice(0, 10).map(m => \n  m.replace(/<h2[^>]*>/i, '').replace(/<\\/h2>/i, '').replace(/<[^>]+>/g, '').trim()\n).filter(t => t.length > 0);\n\n// Pricing block detection\nconst pricingPatterns = /\\$\\s*\\d|SGD|S\\$|from\\s*\\$|trial|package|promo|\\d+\\s*session/i;\nconst pricingBlockDetected = pricingPatterns.test(html);\n\n// FAQ detection\nconst faqDetected = schemaTypes.includes('FAQPage') || \n  /faq|frequently asked|common questions/i.test(html.match(/<h[1-3][^>]*>([^<]*)</gi)?.join(' ') || '');\n\n// Testimonials detection\nconst testimonialsDetected = /testimonial|review|what.*(?:client|patient|customer).*say/i.test(html);\n\n// === 7. PAGE CLASSIFICATION ===\nconst urlLower = url.toLowerCase();\nlet inferredPageType = 'other';\nif (/\\/(pricing|price|rates|fees|cost)/i.test(urlLower)) inferredPageType = 'pricing';\nelse if (/\\/(service|treatment|therapy)/i.test(urlLower)) inferredPageType = 'service';\nelse if (/\\/(contact|location|find-us|reach-us)/i.test(urlLower)) inferredPageType = 'contact';\nelse if (/\\/(about|team|our-story)/i.test(urlLower)) inferredPageType = 'about';\nelse if (/\\/(blog|article|news|post)/i.test(urlLower)) inferredPageType = 'blog';\nelse if (/\\/(faq|frequently)/i.test(urlLower)) inferredPageType = 'faq';\nelse if (/\\/(book|appointment|schedule)/i.test(urlLower)) inferredPageType = 'booking';\nelse if (urlLower.endsWith('/') && urlLower.split('/').filter(Boolean).length <= 1) inferredPageType = 'home';\n\nconst inferredIntentTags = [];\nif (pricingBlockDetected) inferredIntentTags.push('price');\nif (hasForm || bookingPlatform) inferredIntentTags.push('booking');\nif (hasTel || hasWhatsapp) inferredIntentTags.push('contact');\nif (schemaTypes.includes('LocalBusiness') || schemaData.address) inferredIntentTags.push('location');\n\n// === BUILD OUTPUT ===\nconst ogDataStructured = {\n  og: {\n    title: extractOG(html, 'og:title'),\n    description: extractOG(html, 'og:description'),\n    image: extractOG(html, 'og:image'),\n    type: extractOG(html, 'og:type'),\n    url: extractOG(html, 'og:url')\n  },\n  indexation: {\n    robots_meta: robotsMeta,\n    noindex,\n    nofollow,\n    canonical_missing: canonicalMissing,\n    hreflang_present: hreflangPresent,\n    hreflang_locales: hreflangLocales\n  },\n  schema: {\n    types: schemaTypes,\n    business: schemaData\n  },\n  structure: {\n    title_length: title.length,\n    meta_description_length: metaDescription.length,\n    h1_count: h1Count,\n    h2_count: h2Count,\n    h3_count: h3Count,\n    top_h2_list: topH2List,\n    faq_detected: faqDetected,\n    testimonials_detected: testimonialsDetected,\n    pricing_block_detected: pricingBlockDetected\n  },\n  conversion: {\n    has_whatsapp: hasWhatsapp,\n    has_tel: hasTel,\n    has_mailto: hasMailto,\n    has_form: hasForm,\n    booking_platform: bookingPlatform,\n    chat_widget: chatWidget\n  },\n  classification: {\n    inferred_page_type: inferredPageType,\n    inferred_intent_tags: inferredIntentTags\n  },\n  linking: {\n    internal_count: internalCount,\n    external_count: externalCount,\n    top_internal_targets: topInternalLinks\n  }\n};\n\nreturn [{ json: {\n  page_id: data.page_id,\n  content_hash: data.content_hash,\n  title: title.substring(0, 500),\n  meta_description: metaDescription.substring(0, 500),\n  h1: h1.substring(0, 500),\n  canonical_url: canonicalUrl.substring(0, 2000),\n  internal_links_count: internalCount,\n  external_links_count: externalCount,\n  schema_types: schemaTypes,\n  og_data: ogDataStructured\n}}];"
+            },
+            "id": "w5a-extract",
+            "name": "Extract SEO",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                700,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "INSERT INTO wellness.page_seo (\n  page_id, content_hash, title, meta_description, h1, canonical_url,\n  schema_types, internal_links_count, external_links_count, og_data\n) VALUES (\n  $1::uuid, $2, $3, $4, $5, $6, $7::text[], $8, $9, $10::jsonb\n)\nON CONFLICT (page_id, content_hash) DO UPDATE SET\n  title = EXCLUDED.title,\n  meta_description = EXCLUDED.meta_description,\n  h1 = EXCLUDED.h1,\n  canonical_url = EXCLUDED.canonical_url,\n  schema_types = EXCLUDED.schema_types,\n  internal_links_count = EXCLUDED.internal_links_count,\n  external_links_count = EXCLUDED.external_links_count,\n  og_data = EXCLUDED.og_data,\n  extracted_at = NOW()\nRETURNING id, page_id;",
+                "options": {
+                    "queryReplacement": "={{ [$json.page_id, $json.content_hash, $json.title, $json.meta_description, $json.h1, $json.canonical_url, '{' + $json.schema_types.map(t => '\"' + t + '\"').join(',') + '}', $json.internal_links_count, $json.external_links_count, JSON.stringify($json.og_data)] }}"
+                }
+            },
+            "id": "w5a-store",
+            "name": "Store SEO Data",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.6,
+            "position": [
+                900,
+                300
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "postgres-creds-id",
+                    "name": "Postgres account"
+                }
+            },
+            "continueOnFail": true
+        },
+        {
+            "parameters": {
+                "jsCode": "// Continue processing batch\nreturn [{ json: { processed: true } }];"
+            },
+            "id": "w5a-continue",
+            "name": "Continue",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1100,
+                300
+            ]
+        },
+        {
+            "parameters": {},
+            "id": "w5a-done",
+            "name": "Done",
+            "type": "n8n-nodes-base.noOp",
+            "typeVersion": 1,
+            "position": [
+                700,
+                450
+            ]
+        }
+    ],
+    "connections": {
+        "Manual Trigger": {
+            "main": [
+                [
+                    {
+                        "node": "Get Unprocessed Content",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Get Unprocessed Content": {
+            "main": [
+                [
+                    {
+                        "node": "Split Content",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Split Content": {
+            "main": [
+                [
+                    {
+                        "node": "Extract SEO",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                [
+                    {
+                        "node": "Done",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Extract SEO": {
+            "main": [
+                [
+                    {
+                        "node": "Store SEO Data",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Store SEO Data": {
+            "main": [
+                [
+                    {
+                        "node": "Continue",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Continue": {
+            "main": [
+                [
+                    {
+                        "node": "Split Content",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        }
+    },
+    "settings": {
+        "executionOrder": "v1"
+    },
+    "active": false
+}

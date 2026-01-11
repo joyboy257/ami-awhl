@@ -1,0 +1,626 @@
+{
+    "name": "W-8: Monitor + Expand",
+    "nodes": [
+        {
+            "parameters": {
+                "rule": {
+                    "interval": [
+                        {
+                            "triggerAtHour": 18
+                        }
+                    ]
+                }
+            },
+            "id": "w8-schedule",
+            "name": "Schedule Trigger",
+            "type": "n8n-nodes-base.scheduleTrigger",
+            "typeVersion": 1.2,
+            "position": [
+                100,
+                300
+            ],
+            "notes": "Daily 2am SGT = 18:00 UTC"
+        },
+        {
+            "parameters": {},
+            "id": "w8-manual",
+            "name": "Manual Trigger",
+            "type": "n8n-nodes-base.manualTrigger",
+            "typeVersion": 1,
+            "position": [
+                100,
+                500
+            ]
+        },
+        {
+            "parameters": {
+                "jsCode": "// Parse input parameters\nconst input = $input.first()?.json || {};\nconst dryRun = input.dry_run === true;\nconst now = new Date();\nconst dayOfWeek = now.getUTCDay(); // 0 = Sunday\nconst dayOfMonth = now.getUTCDate();\n\n// Determine which tasks to run based on cadence\nconst tasks = [];\n\n// Daily: Tier A SERP refresh\ntasks.push({ task: 'serp_refresh', tier: 'A', reason: 'daily_tier_a' });\n\n// Sunday: Tier B SERP refresh\nif (dayOfWeek === 0) {\n  tasks.push({ task: 'serp_refresh', tier: 'B', reason: 'weekly_tier_b' });\n}\n\n// Daily: Crawl due pages (pages not crawled in 7+ days)\ntasks.push({ task: 'crawl_due', reason: 'stale_pages' });\n\n// 1st of month: Discovery refresh\nif (dayOfMonth === 1) {\n  tasks.push({ task: 'discovery_refresh', reason: 'monthly_refresh' });\n}\n\nreturn [{\n  json: {\n    dry_run: dryRun,\n    run_date: now.toISOString(),\n    day_of_week: dayOfWeek,\n    day_of_month: dayOfMonth,\n    tasks_to_run: tasks,\n    limits: {\n      max_serp_queries: 50,\n      max_pages_to_crawl: 100,\n      max_domains_to_discover: 20\n    }\n  }\n}];"
+            },
+            "id": "w8-plan",
+            "name": "Plan Tasks",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                300,
+                400
+            ]
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "-- Check for concurrent W-8 runs\n-- Return a single row with lock status info (always returns 1 row)\nSELECT \n  COALESCE(r.id::text, 'none') as run_id,\n  COALESCE(r.started_at::text, '') as started_at,\n  COALESCE(EXTRACT(EPOCH FROM (NOW() - r.started_at)) / 3600, 0) as hours_running,\n  CASE \n    WHEN r.id IS NULL THEN 'clear'\n    WHEN r.started_at < NOW() - INTERVAL '2 hours' THEN 'stale'\n    ELSE 'active'\n  END as lock_status\nFROM (SELECT 1) as dummy\nLEFT JOIN wellness.runs r ON r.status = 'running' AND r.mode = 'monitor'\nORDER BY r.started_at DESC NULLS LAST\nLIMIT 1;",
+                "options": {
+                    "queryBatching": "independently"
+                }
+            },
+            "id": "w8-lock-check",
+            "name": "Check Lock",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.6,
+            "position": [
+                500,
+                400
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "postgres-creds-id",
+                    "name": "Postgres account"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "jsCode": "// Handle lock check result and determine next action\nconst plan = $('Plan Tasks').first().json;\nconst lockResult = $input.first().json;\n\nconst lockStatus = lockResult.lock_status;\nconst runId = lockResult.run_id !== 'none' ? lockResult.run_id : null;\nconst hoursRunning = parseFloat(lockResult.hours_running) || 0;\n\n// Determine action: 'skip', 'override', or 'proceed'\nlet action = 'proceed';\nlet message = 'No concurrent runs, proceeding';\nlet staleRunId = null;\n\nif (lockStatus === 'stale') {\n  action = 'override';\n  staleRunId = runId;\n  message = `Overriding stale run ${runId} (running for ${hoursRunning.toFixed(1)} hours)`;\n} else if (lockStatus === 'active') {\n  action = 'skip';\n  message = `Skipping: concurrent run ${runId} active (${hoursRunning.toFixed(1)} hours)`;\n}\n\nreturn [{\n  json: {\n    ...plan,\n    lock_status: lockStatus,\n    action: action,\n    stale_run_id: staleRunId,\n    message: message\n  }\n}];"
+            },
+            "id": "w8-lock-decision",
+            "name": "Lock Decision",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                700,
+                400
+            ]
+        },
+        {
+            "parameters": {
+                "rules": {
+                    "values": [
+                        {
+                            "conditions": {
+                                "options": {
+                                    "caseSensitive": true,
+                                    "leftValue": "",
+                                    "typeValidation": "strict"
+                                },
+                                "conditions": [
+                                    {
+                                        "leftValue": "={{ $json.action }}",
+                                        "rightValue": "skip",
+                                        "operator": {
+                                            "type": "string",
+                                            "operation": "equals"
+                                        }
+                                    }
+                                ],
+                                "combinator": "and"
+                            },
+                            "renameOutput": true,
+                            "outputLabel": "Skip"
+                        },
+                        {
+                            "conditions": {
+                                "options": {
+                                    "caseSensitive": true,
+                                    "leftValue": "",
+                                    "typeValidation": "strict"
+                                },
+                                "conditions": [
+                                    {
+                                        "leftValue": "={{ $json.action }}",
+                                        "rightValue": "override",
+                                        "operator": {
+                                            "type": "string",
+                                            "operation": "equals"
+                                        }
+                                    }
+                                ],
+                                "combinator": "and"
+                            },
+                            "renameOutput": true,
+                            "outputLabel": "Override"
+                        },
+                        {
+                            "conditions": {
+                                "options": {
+                                    "caseSensitive": true,
+                                    "leftValue": "",
+                                    "typeValidation": "strict"
+                                },
+                                "conditions": [
+                                    {
+                                        "leftValue": "={{ $json.action }}",
+                                        "rightValue": "proceed",
+                                        "operator": {
+                                            "type": "string",
+                                            "operation": "equals"
+                                        }
+                                    }
+                                ],
+                                "combinator": "and"
+                            },
+                            "renameOutput": true,
+                            "outputLabel": "Proceed"
+                        }
+                    ]
+                }
+            },
+            "id": "w8-route",
+            "name": "Route Action",
+            "type": "n8n-nodes-base.switch",
+            "typeVersion": 3,
+            "position": [
+                900,
+                400
+            ]
+        },
+        {
+            "parameters": {
+                "jsCode": "// Blocked by active run - just output the plan\nconst plan = $input.first().json;\nreturn [{\n  json: {\n    mode: plan.dry_run ? 'dry_run' : 'blocked',\n    message: plan.message,\n    tasks_planned: plan.tasks_to_run,\n    limits: plan.limits,\n    run_date: plan.run_date,\n    executed: false\n  }\n}];"
+            },
+            "id": "w8-skip-output",
+            "name": "Skip Output",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1100,
+                200
+            ]
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "-- Override stale lock\nUPDATE wellness.runs \nSET \n  status = 'failed', \n  ended_at = NOW(),\n  result_summary = jsonb_build_object(\n    'error', 'stale_lock_override', \n    'overridden_at', NOW()::text,\n    'overridden_by', 'W-8 auto-recovery'\n  )\nWHERE id = '{{ $json.stale_run_id }}'::uuid\n  AND status = 'running'\nRETURNING id;"
+            },
+            "id": "w8-override-stale",
+            "name": "Override Stale Lock",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.6,
+            "position": [
+                1100,
+                400
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "postgres-creds-id",
+                    "name": "Postgres account"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "-- Create new run record\nINSERT INTO wellness.runs (mode, status, started_at, budgets)\nVALUES (\n  'monitor', \n  'running', \n  NOW(), \n  '{{ JSON.stringify($json.limits || {}) }}'::jsonb\n)\nRETURNING id, mode, status, started_at;"
+            },
+            "id": "w8-create-run",
+            "name": "Create Run",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.6,
+            "position": [
+                1300,
+                500
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "postgres-creds-id",
+                    "name": "Postgres account"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "-- Get Tier A queries not snapshotted in last 24 hours\nSELECT id, query_text, vertical_id\nFROM wellness.search_queries\nWHERE priority_tier = 'A' \n  AND active = true\n  AND id NOT IN (\n    SELECT query_id FROM wellness.serp_snapshots\n    WHERE captured_at >= NOW() - INTERVAL '24 hours'\n  )\nLIMIT 50;"
+            },
+            "id": "w8-serp-tier-a",
+            "name": "Get Tier A Queries",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.6,
+            "position": [
+                1500,
+                300
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "postgres-creds-id",
+                    "name": "Postgres account"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "-- Get Tier B queries not snapshotted in last 7 days\nSELECT id, query_text, vertical_id\nFROM wellness.search_queries\nWHERE priority_tier = 'B' \n  AND active = true\n  AND id NOT IN (\n    SELECT query_id FROM wellness.serp_snapshots\n    WHERE captured_at >= NOW() - INTERVAL '7 days'\n  )\nLIMIT 50;"
+            },
+            "id": "w8-serp-tier-b",
+            "name": "Get Tier B Queries",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.6,
+            "position": [
+                1500,
+                500
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "postgres-creds-id",
+                    "name": "Postgres account"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "-- Get pages due for re-crawl (not crawled in 7+ days)\nSELECT p.id, p.url, p.domain_id, p.page_type, p.last_crawled_at\nFROM wellness.pages p\nJOIN wellness.domains d ON p.domain_id = d.id\nWHERE (\n    p.last_crawled_at < NOW() - INTERVAL '7 days'\n    OR p.last_crawled_at IS NULL\n  )\n  AND p.page_type IN ('service', 'pricing', 'contact', 'about')\n  AND d.discovery_state = 'complete'\n  AND d.domain_class IS DISTINCT FROM 'aggregator'\nORDER BY p.last_crawled_at ASC NULLS FIRST\nLIMIT 100;"
+            },
+            "id": "w8-crawl-due",
+            "name": "Get Due Pages",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.6,
+            "position": [
+                1500,
+                700
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "postgres-creds-id",
+                    "name": "Postgres account"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "-- Discovery refresh: stale domains meeting refresh criteria\nWITH persistent_failures AS (\n  SELECT domain_id\n  FROM wellness.sitemaps\n  WHERE error_json IS NOT NULL\n  GROUP BY domain_id\n  HAVING COUNT(*) >= 3\n),\ntop_performers AS (\n  SELECT c.id as clinic_id\n  FROM wellness.clinics c\n  WHERE c.competitor_score > 0\n    AND c.competitor_score >= (\n      SELECT PERCENTILE_CONT(0.8) WITHIN GROUP (ORDER BY competitor_score)\n      FROM wellness.clinics c2 \n      WHERE c2.vertical_id = c.vertical_id\n        AND c2.competitor_score > 0\n    )\n),\ndomain_pages AS (\n  SELECT domain_id, COUNT(*) as page_count\n  FROM wellness.pages\n  GROUP BY domain_id\n)\nUPDATE wellness.domains d\nSET discovery_state = 'pending'\nWHERE d.discovery_state = 'complete'\n  AND d.created_at < NOW() - INTERVAL '60 days'\n  AND d.id NOT IN (SELECT domain_id FROM persistent_failures WHERE domain_id IS NOT NULL)\n  AND (\n    COALESCE((SELECT page_count FROM domain_pages WHERE domain_id = d.id), 0) < 5\n    OR d.clinic_id IN (SELECT clinic_id FROM top_performers)\n  )\nRETURNING d.id, d.domain;"
+            },
+            "id": "w8-discovery-refresh",
+            "name": "Discovery Refresh",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.6,
+            "position": [
+                1500,
+                900
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "postgres-creds-id",
+                    "name": "Postgres account"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "-- Mark known aggregator domains\nUPDATE wellness.domains\nSET domain_class = 'aggregator'\nWHERE domain_class IS NULL\n  AND (\n    domain ~* '(theurbanlist|threebestrated|yelp|tripadvisor|honeycombers)'\n    OR domain ~* '(review|rating|directory|compare|best.*of)'\n  )\nRETURNING id, domain, domain_class;"
+            },
+            "id": "w8-aggregator-guard",
+            "name": "Aggregator Guard",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.6,
+            "position": [
+                1700,
+                500
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "postgres-creds-id",
+                    "name": "Postgres account"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "jsCode": "// Get pages from previous node and prepare for job enqueue\nconst pages = $input.all();\nlet runId = null;\ntry { runId = $('Create Run').first()?.json?.id; } catch (e) {}\n\nif (!pages.length || !runId) {\n  return [{ json: { enqueued: 0, message: 'No pages to enqueue or no run ID', pages: [] } }];\n}\n\n// Return pages data for the next SQL node\nreturn [{\n  json: {\n    run_id: runId,\n    pages: pages.map(p => ({ id: p.json.id, url: p.json.url }))\n  }\n}];"
+            },
+            "id": "w8-prepare-jobs",
+            "name": "Prepare Jobs",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1700,
+                700
+            ]
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "-- Enqueue pages for W-4 crawl (only if pages exist)\nWITH page_list AS (\n  SELECT \n    (elem->>'id')::uuid as page_id,\n    elem->>'url' as url\n  FROM jsonb_array_elements(\n    CASE WHEN '{{ JSON.stringify($json.pages || []) }}' = '[]' THEN '[]'::jsonb\n    ELSE '{{ JSON.stringify($json.pages || []) }}'::jsonb END\n  ) as elem\n  WHERE elem IS NOT NULL\n)\nINSERT INTO wellness.jobs (run_id, job_type, payload, dedupe_key, state)\nSELECT \n  '{{ $json.run_id }}'::uuid,\n  'crawl',\n  jsonb_build_object('page_id', page_id, 'url', url),\n  'crawl_' || page_id::text,\n  'available'\nFROM page_list\nWHERE page_id IS NOT NULL\nON CONFLICT (dedupe_key) DO NOTHING\nRETURNING id, job_type;"
+            },
+            "id": "w8-enqueue-crawl",
+            "name": "Enqueue Crawl Jobs",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.6,
+            "position": [
+                1900,
+                700
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "postgres-creds-id",
+                    "name": "Postgres account"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "jsCode": "// Compile results from all task branches\nlet runInfo = {};\ntry { runInfo = $('Create Run').first()?.json || {}; } catch (e) {}\n\n// Count items from each branch (they may be empty arrays)\nlet tierACount = 0;\nlet tierBCount = 0;\nlet duePagesCount = 0;\nlet discoveryCount = 0;\nlet aggregatorCount = 0;\nlet enqueuedCount = 0;\n\ntry { tierACount = $('Get Tier A Queries').all().length; } catch (e) {}\ntry { tierBCount = $('Get Tier B Queries').all().length; } catch (e) {}\ntry { duePagesCount = $('Get Due Pages').all().length; } catch (e) {}\ntry { discoveryCount = $('Discovery Refresh').all().length; } catch (e) {}\ntry { aggregatorCount = $('Aggregator Guard').all().length; } catch (e) {}\ntry { enqueuedCount = $('Enqueue Crawl Jobs').all().length; } catch (e) {}\n\nconst summary = {\n  run_id: runInfo.id,\n  mode: 'executed',\n  started_at: runInfo.started_at,\n  tasks_completed: {\n    serp_tier_a_queries: tierACount,\n    serp_tier_b_queries: tierBCount,\n    pages_due_for_crawl: duePagesCount,\n    domains_refreshed: discoveryCount,\n    aggregators_tagged: aggregatorCount,\n    crawl_jobs_enqueued: enqueuedCount\n  },\n  completed_at: new Date().toISOString()\n};\n\nreturn [{ json: summary }];"
+            },
+            "id": "w8-compile-results",
+            "name": "Compile Results",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                2100,
+                500
+            ]
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "-- Mark run as completed\nUPDATE wellness.runs\nSET \n  status = 'completed',\n  ended_at = NOW(),\n  result_summary = '{{ JSON.stringify($json) }}'::jsonb\nWHERE id = '{{ $json.run_id }}'::uuid\nRETURNING id, status, ended_at;"
+            },
+            "id": "w8-complete-run",
+            "name": "Complete Run",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.6,
+            "position": [
+                2300,
+                500
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "postgres-creds-id",
+                    "name": "Postgres account"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "jsCode": "// Final output\nlet results = {};\ntry { results = $('Compile Results').first()?.json || {}; } catch (e) {}\nconst runComplete = $input.first()?.json || {};\n\nreturn [{\n  json: {\n    success: true,\n    run_id: results.run_id,\n    mode: results.mode,\n    tasks_completed: results.tasks_completed,\n    started_at: results.started_at,\n    completed_at: runComplete.ended_at\n  }\n}];"
+            },
+            "id": "w8-summary",
+            "name": "Summary",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                2500,
+                500
+            ]
+        }
+    ],
+    "connections": {
+        "Schedule Trigger": {
+            "main": [
+                [
+                    {
+                        "node": "Plan Tasks",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Manual Trigger": {
+            "main": [
+                [
+                    {
+                        "node": "Plan Tasks",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Plan Tasks": {
+            "main": [
+                [
+                    {
+                        "node": "Check Lock",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Check Lock": {
+            "main": [
+                [
+                    {
+                        "node": "Lock Decision",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Lock Decision": {
+            "main": [
+                [
+                    {
+                        "node": "Route Action",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Route Action": {
+            "main": [
+                [
+                    {
+                        "node": "Skip Output",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                [
+                    {
+                        "node": "Override Stale Lock",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                [
+                    {
+                        "node": "Create Run",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Override Stale Lock": {
+            "main": [
+                [
+                    {
+                        "node": "Create Run",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Create Run": {
+            "main": [
+                [
+                    {
+                        "node": "Get Tier A Queries",
+                        "type": "main",
+                        "index": 0
+                    },
+                    {
+                        "node": "Get Tier B Queries",
+                        "type": "main",
+                        "index": 0
+                    },
+                    {
+                        "node": "Get Due Pages",
+                        "type": "main",
+                        "index": 0
+                    },
+                    {
+                        "node": "Discovery Refresh",
+                        "type": "main",
+                        "index": 0
+                    },
+                    {
+                        "node": "Aggregator Guard",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Get Due Pages": {
+            "main": [
+                [
+                    {
+                        "node": "Prepare Jobs",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Prepare Jobs": {
+            "main": [
+                [
+                    {
+                        "node": "Enqueue Crawl Jobs",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Get Tier A Queries": {
+            "main": [
+                [
+                    {
+                        "node": "Compile Results",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Get Tier B Queries": {
+            "main": [
+                [
+                    {
+                        "node": "Compile Results",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Enqueue Crawl Jobs": {
+            "main": [
+                [
+                    {
+                        "node": "Compile Results",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Discovery Refresh": {
+            "main": [
+                [
+                    {
+                        "node": "Compile Results",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Aggregator Guard": {
+            "main": [
+                [
+                    {
+                        "node": "Compile Results",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Compile Results": {
+            "main": [
+                [
+                    {
+                        "node": "Complete Run",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Complete Run": {
+            "main": [
+                [
+                    {
+                        "node": "Summary",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        }
+    },
+    "settings": {
+        "executionOrder": "v1"
+    },
+    "active": false
+}

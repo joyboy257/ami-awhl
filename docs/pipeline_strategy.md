@@ -1,432 +1,332 @@
-# AMI Pipeline Strategy (n8n) — Clean v1.0
+# AMI Pipeline Strategy (n8n) — Polished v1.1
 
-Verticals in scope (v1):
-- TCM
-- Beauty
-- Chiropractic
-- Aesthetics
+**AMI (AWHL Market Intelligence)** is an automated competitive intelligence pipeline for the Singapore wellness market.
+
+**Verticals (v1):** TCM • Beauty • Chiropractic • Aesthetics  
+**North-star UX:** *Click “Run” → AMI populates Postgres with battlecard-ready competitor intel (SEO + positioning + conversion signals + pricing evidence), bounded and observable.*
 
 ---
 
-## 1) Mental Model (The Loop)
+## 1) Mental Model
 
-You are running a loop:
+AMI runs an always-on loop:
 
-**Vertical → Search Queries → SERP → Clinics/Domains → Site Inventory → Crawl → SEO + Keywords + Commercial Facts → Score → Monitor → Repeat**
+**Vertical → Search Queries → SERP → Clinics/Domains → Site Inventory → Crawl → Enrich (SEO + Keywords + Commercial Facts) → Score → Monitor → Repeat**
 
-Everything must be:
-- **Bounded** (hard budgets to prevent runaway costs)
-- **Retryable** (job-based execution, resumable)
-- **Observable** (clear run/job status + failure reasons)
-- **Incremental** (reprocess only when content changes)
+System-wide invariants:
+
+- **Bounded:** explicit budgets so runs never explode.
+- **Retryable:** safe to re-run; job-style execution; no silent failures.
+- **Observable:** every step emits counts + failure reasons.
+- **Incremental:** reprocess only when content changes (hash-based).
+
 
 ```mermaid
 graph TD
-    V[Verticals] --> W1[W1 Build Search Queries]
-    W1 --> SQ[(search_queries)]
-    SQ --> W2[W2 SERP Snapshot + Seed]
-    W2 --> SD[(serp_snapshots)]
-    W2 --> SR[(serp_results)]
-    W2 --> CL[(clinics)]
-    W2 --> DM[(domains)]
-    DM --> W3[W3 Site Discovery]
-    W3 --> SM[(sitemaps)]
-    W3 --> PG[(pages)]
-    PG --> W4[W4 Crawl Router]
-    W4 --> PF[(page_fetches)]
-    W4 --> PC[(page_content)]
-    PC --> W5[W5 SEO + Keywords]
-    W5 --> SEO[(page_seo)]
-    W5 --> PK[(page_keywords)]
-    W5 --> CK[(clinic_keywords)]
-    PC --> W6[W6 Commercial Facts]
-    W6 --> OF[(clinic_offers)]
-    W6 --> CTA[(clinic_ctas)]
-    SR --> W7[W7 Scoring]
-    CK --> W7
-    OF --> W7
-    W7 --> SC[(competitor_scores)]
-    SC --> W8[W8 Monitor + Expand]
-    W8 -.-> W2
-    W8 -.-> W4
-2) Minimum Viable Data (Tables)
-Keep tables simple and “source-of-truth-ish”. Extend later.
+  V[Verticals] --> W1[W1 Build Search Queries]
+  W1 --> SQ[(search_queries)]
+  SQ --> W2[W2 SERP Snapshot + Seed Clinics/Domains]
+  W2 --> SS[(serp_snapshots)]
+  W2 --> SR[(serp_results)]
+  W2 --> CL[(clinics)]
+  W2 --> DM[(domains)]
+
+  DM --> W3[W3 Site Discovery]
+  W3 --> SM[(sitemaps)]
+  W3 --> PG[(pages)]
+
+  PG --> W4[W4 Crawl Router]
+  W4 --> PF[(page_fetches)]
+  W4 --> PC[(page_content)]
+
+  PC --> W5[W5 Enrichment: SEO + Keywords]
+  W5 --> SEO[(page_seo)]
+  W5 --> PK[(page_keywords)]
+  W5 --> CK[(clinic_keywords)]
+
+  PC --> W6[W6 Commercial Facts]
+  W6 --> OF[(clinic_offers)]
+  W6 --> CTA[(clinic_ctas)]
 
-Core entities
-verticals — { id, name }
+  SR --> W7[W7 Scoring]
+  CK --> W7
+  OF --> W7
+  W7 --> SC[(competitor_scores)]
+
+  SC --> W8[W8 Monitoring + Expansion]
+  W8 -.-> W2
+  W8 -.-> W4
+```
 
-geo_sets — SG areas (optional but recommended)
+---
 
-services — per vertical service taxonomy
+## 2) Battlecard-Ready Data Spec
+
+If W4/W5 only extract `title` and link counts, the output feels “pitiful” because it can’t answer business questions. The point of AMI is **positioning + conversion + pricing intelligence**.
 
-search_query_templates — patterns like "best {service} in {geo}", "{service} near me"
+### 2.1 Page-level SEO (deterministic, parsed from `html_body`)
+
+**Core SEO**
+- `title`
+- `meta_description`
+- `h1`
+- `canonical_url` from `<link rel="canonical" href="...">`
+- `robots_meta` from `<meta name="robots" content="...">` (derive `noindex`/`nofollow` flags)
+- Heading structure: `h1_count`, `h2_count`, `h3_count`, plus `top_h2_list` (first ~10)
+- Link counts: `internal_links_count`, `external_links_count` (host-based)
+- OpenGraph/Twitter tags as JSON (`og:*`, `twitter:*`)
 
-search_queries — generated queries per vertical (output of W1)
+**Structured data (schema.org)**
+- `schema_types[]` extracted from JSON-LD blocks:
+  - Handle arrays, `@graph`, and `@type` as string or array
+  - De-duplicate, cap to reasonable size
+
+**Technical / internationalization**
+- `hreflang_locales[]` (if any)
+- Optional quick health signals: `title_length`, `meta_description_length`
 
-Seeding + SERP
-serp_snapshots — raw SerpAPI JSON per query + timestamp
+### 2.2 Conversion signals (deterministic, battlecard gold)
 
-serp_results — parsed results (rank, type=organic/local_pack, title, url, domain)
+Store these as structured keys inside `page_seo.og_data` (or equivalent JSONB) to avoid schema sprawl.
 
-clinics — canonical business entity (name, vertical_id, confidence, first_seen_at)
+- `has_whatsapp` (wa.me / api.whatsapp.com)
+- `has_tel` (tel:)
+- `has_mailto` (mailto:)
+- `has_form` (`<form>` present)
+- `booking_provider` (fresha/mindbody/calendly/acuity/etc. if detectable)
+- `chat_widget` (intercom/drift/crisp/tawk/zendesk/etc. patterns)
+- `pricing_detected` (simple price/SGD/$ patterns)
+- `faq_detected` (FAQ markup/patterns)
+- `testimonials_detected` (testimonial/review patterns)
+- `inferred_page_type` (service / pricing / contact / blog / other)
 
-domains — domain list + mapping to clinic_id
+### 2.3 Clinic-level rollups (battlecard summary)
+
+- Top clinic keywords (weighted toward service/pricing/contact pages)
+- Conversion channel mix (WhatsApp vs booking vs phone)
+- Schema adoption (does the clinic use `LocalBusiness` / `MedicalBusiness` etc.)
+- Evidence-backed offers & CTAs (from W6)
+
+---
+
+## 3) Data Model (Minimum Viable Tables)
+
+Keep tables “source-of-truth-ish”. Extend later.
+
+### 3.1 Core
+- `verticals`, `services`, `geo_sets`
+- `search_query_templates`, `search_queries`
+
+### 3.2 SERP
+- `serp_snapshots` (raw JSON)
+- `serp_results` (parsed ranks)
+- `domains` (competitor sites)
+- `clinics` (canonical entity; may be provisional)
 
-Site inventory + crawl
-sitemaps — discovered sitemap URLs per domain
+### 3.3 Inventory + Crawl
+- `sitemaps`, `pages`
+- `page_fetches` (append-only logs)
+- `page_content` (html_body + cleaned markdown + word_count)
 
-pages — URL inventory (url, domain_id, page_type, last_seen, last_crawled_at, content_hash)
+### 3.4 Enrichment
+- `page_seo` (deterministic SEO + conversion signals; rich extras in JSONB)
+- `page_keywords`, `clinic_keywords`
+- `clinic_offers`, `clinic_ctas` (evidence-first)
+
+### 3.5 Ops (required for “smooth runs”)
+- `runs`, `jobs`
 
-page_fetches — fetch logs (status_code, fetch_method, bytes, error, fetched_at)
+---
+## 4) Workflow Strategy (W1 → W8)
 
-page_content — cleaned markdown + html refs (or blob path)
+### W1 — Build Search Queries
+**Goal:** generate deterministic, repeatable top-of-funnel queries to discover competitors and market demand.  
+**Cadence:** weekly or on demand.
 
-Enrichment outputs
-page_seo — title/meta/H1/canonical/schema/hreflang/etc.
+**Inputs:** `services × geo_sets × templates` (bounded), plus intent terms (`price`, `trial`, `package`, `promo`, `review`, `best`).
 
-page_keywords — extracted keywords per page (term, score, method)
+**Outputs:** `search_queries` with tiers A/B/C and `active=true`.
 
-clinic_keywords — rolled up keywords per clinic/domain
+**Budgets (defaults)**
+- Max queries per vertical per run: **200**
+- Always enforce uniqueness per `(vertical_id, query_text)`
 
-clinic_offers — prices/packages/trials evidence-based
+---
 
-clinic_ctas — whatsapp/book/phone etc evidence-based
+### W2 — SERP Snapshot + Seed Clinics/Domains
+**Goal:** discover competitors and visibility signals.  
+**Cadence:** daily (Tier A), weekly (Tier B).
 
-Ops (required for “smooth runs”)
-runs — run_id, started/ended, mode, budgets, status
+**Steps**
+1. Snapshot SERP response → store raw JSON in `serp_snapshots`.
+2. Parse results → `serp_results` (organic + local pack if present).
+3. Upsert `domains` and resolve `clinics`.
 
-jobs — queue table (job_type, payload, state, attempts, available_at, locked_at)
+**Important (Singapore reality)**
+- **Do not depend on Local Pack**. Many SG queries return organic-only.
+- If local pack is absent, create **provisional clinics** from domains (confidence flag), then optionally enrich later.
 
-You cannot have “smooth trigger” without runs + jobs even if everything else is perfect.
+**Budgets (defaults)**
+- Max SERP calls per run: **150 (smoke)** / **300 (full)**
+- Max new domains per run: **50** (queue the rest)
 
-3) Workflow Map (W1 → W8)
-Workflow 1 — Build Search Queries (per vertical)
-Goal: generate the search queries to discover clinics + keyword universe.
-Trigger: manual (“Run for verticals”), or weekly schedule.
+---
 
-Inputs
+### W3 — Site Discovery (Inventory Build)
+**Goal:** turn competitor domains into a URL inventory cheaply and safely.  
+**Cadence:** daily for new domains; monthly refresh.
 
-verticals = {TCM, Beauty, Chiropractic, Aesthetics}
+**Steps**
+- Fetch `robots.txt` and parse sitemap directives
+- Guess common sitemap endpoints (bounded)
+- Parse sitemap XML with recursion depth ≤ **3**
+- Upsert `pages` with `lastmod` where available
 
-services per vertical (start with 10–30 each)
+**Output:** a large inventory of candidate pages, without doing heavy crawling yet.
 
-geo terms (optional): Central, East, West, North, CBD, neighborhoods, “near me”
+---
 
-query templates: 10–20 patterns
+### W4 — Crawl Router (Breadth-first, high-intent first)
+**Goal:** fetch real pages reliably, store stable content, and provide a clean foundation for all downstream extraction.
 
-Process
+**Selection strategy (critical)**
+- **Breadth-first across domains** (avoid crawling 200 pages from only 3 domains).
+- Prioritize high-intent URLs first:
+  `/pricing|price|trial|promo|package|services|treatments|contact|book`
+- Exclude sitemap-like URLs:
+  - URL pattern filter (e.g., `%sitemap%`, `sitemap(_index)?\.xml$`)
+  - Body detection (`<urlset>` / `<sitemapindex>`)
 
-Cartesian product but bounded:
+**Quality gates (must log reason codes)**
+- Blocked/captcha patterns
+- HTML too small / clearly error page
+- Sitemap XML detected
 
-max_queries_per_vertical_per_run (default 200)
+**Writes**
+- `page_fetches` (every attempt, success + fail)
+- `page_content` (html_body + cleaned markdown + word_count)
+- `pages.content_hash` = **SHA256(normalized markdown)**
 
-enforce uniqueness via hash(vertical_id + query_text + geo)
+**Budgets (defaults)**
+- Per-domain concurrency: **1**
+- Delay between requests: **~2s**
+- Pages per run: start **20–100**, only increase after coverage improves
 
-Two layers:
+---
 
-Service queries: “acupuncture near me”, “chiropractor tampines”
+### W5 — Enrichment: SEO + Keywords
+**Goal:** produce battlecard-ready SEO + positioning signals.
 
-Intent queries: price, trial, package, promo, review, best
+**W5A (Deterministic SEO + conversion signals)**
+- Parse from `page_content.html_body` (true metadata)
+- Store core SEO fields + `schema_types[]`
+- Store rich extras into JSONB (e.g., conversion signals, headings counts)
 
-Output
-Insert into search_queries:
+**W5B (Keyword extraction)**
+- Only run on **real pages** with meaningful markdown
+- Tiered extraction:
+  - Cheap: tf-idf / n-grams
+  - Optional AI: only for priority page types
 
-vertical_id, query_text, geo, intent_tag, priority_tier (A/B/C), active=true
+**W5C (Clinic rollup)**
+- Aggregate `page_keywords` → `clinic_keywords`
+- Weight page types (service/pricing/contact > blog)
+- Keep top N per clinic
 
-Workflow 2 — Seed Clinics + Keywords (SERP-driven + optional manual)
-Goal: discover clinics/domains from SERP and seed your keyword universe.
-Trigger: after W1, or “Run full seed”.
+---
 
-Inputs
+### W6 — Commercial Facts (Evidence-first)
+**Goal:** extract offers, prices, promos, and CTAs with proof.
 
-search_queries where active=true and priority_tier in (A, B)
+- AI extraction only on likely commercial pages
+- Every extracted row must include an evidence snippet that substring-matches page content
+- Write to `clinic_offers` and `clinic_ctas`
 
-2A) SERP snapshot
+---
 
-Call SerpAPI for each query (bounded)
+### W7 — Scoring
+**Goal:** turn raw signals into ranked competitor insights.
 
-Store raw JSON in serp_snapshots
+Inputs typically include:
+- SERP visibility (rank-weighted)
+- Inventory depth (pages discovered + crawled)
+- Conversion strength (WhatsApp/booking/phone)
+- Commercial completeness (offers present)
+- Technical signals (schema usage, indexation)
 
-Parse:
+Outputs:
+- per-vertical leaderboards
+- competitor battlecards
 
-organic results (url, title, snippet)
+---
 
-local pack / map pack (if available)
-
-Upsert serp_results
-
-2B) Convert SERP results into clinic/domain seeds
-
-Extract domain from each result URL
-
-Heuristics:
-
-exclude directories/aggregators (config denylist)
-
-prefer URLs with patterns like /contact, /services, /treatment, /pricing
-
-Upsert:
-
-domains
-
-clinics (best-effort name from SERP; mark low confidence if uncertain)
-
-map domain → clinic (if unsure, keep clinic unresolved but domain retained)
-
-2C) Seed keywords (initial)
-3 keyword sources:
-
-your query_texts (highest intent)
-
-SERP “related searches / people also ask” (expand)
-
-SERP snippets/title n-grams (lightweight)
-
-Store in clinic_keywords (or dedicated keywords table) with:
-
-vertical_id, term, source={query|related|snippet}, initial_score
-
-Outputs
-
-domains/clinics ready to crawl
-
-initial keywords aligned to vertical
-
-Workflow 3 — Site Discovery (build URL inventory per domain)
-Goal: turn each seeded domain into a page inventory.
-Trigger: after W2, or daily for new domains.
-
-Inputs
-
-domains where discovery_state != complete
-
-Process
-
-Fetch robots.txt
-
-Extract sitemap URLs
-
-Guess common sitemap endpoints regardless (bounded)
-
-Fetch/parse sitemap XML:
-
-recurse to depth 3
-
-extract page URLs (+ lastmod if present)
-
-Outputs
-
-sitemaps filled
-
-pages populated with candidate URLs
-
-mark domain discovery complete + counts
-
-Discovery does not crawl deeply; it only builds inventory.
-
-Workflow 4 — Crawl Router (fetch + clean content)
-Goal: fetch pages reliably and store stable content hashes.
-Trigger: scheduled (hourly) + manual “crawl now”.
-
-Inputs
-
-pages due for crawl:
-
-last_crawled_at is null OR older than track_level interval
-
-not excluded by rules (robots, duplicates, denylist)
-
-Process
-
-Enforce per-domain throttle (critical)
-
-Try in order:
-
-HTTP GET
-
-if thin/blocked → headless (Crawl4AI)
-
-if still blocked → Firecrawl
-
-Save:
-
-fetch metadata in page_fetches
-
-HTML (or pointer to storage)
-
-cleaned markdown in page_content
-
-content_hash = sha256(markdown) on pages
-
-Outputs
-
-content DB filled with stable hashes (enables incremental processing)
-
-Workflow 5 — SEO Enrichment (on changed pages)
-Goal: enrich SEO fields + derive keywords from content.
-Trigger: whenever content_hash changes (or after crawl batch).
-
-Inputs
-
-pages where content_hash != last_processed_hash
-
-5A) SEO metadata extraction (deterministic)
-Extract from HTML:
-
-title, meta description
-
-H1/H2s
-
-canonical
-
-robots meta
-
-OG tags
-
-schema.org JSON-LD presence + types
-
-hreflang (if any)
-
-internal links count, external links count
-
-image alt coverage (optional)
-
-Store in page_seo.
-
-5B) Keyword extraction (2-pass)
-
-Pass 1 (cheap): tf-idf / n-grams / RAKE-like from markdown
-
-Pass 2 (AI only for priority pages): “extract service + geo + intent keywords”
-
-Store in page_keywords.
-
-5C) Roll up to clinic/domain level
-Aggregate top terms across all pages per domain (weight service pages > blog).
-Store in clinic_keywords.
-
-Outputs
-
-SEO data + keywords ready
-
-Workflow 6 — Commercial Facts (offers, prices, promos, CTAs)
-Goal: produce battlecard-ready facts with evidence.
-Trigger: after W5, only for likely commercial pages.
-
-Inputs
-
-pages where page_type in (service, commercial, contact)
-OR content contains pricing signals
-
-Process
-AI extraction with evidence rule:
-
-Offer type (trial/package)
-
-Price + currency
-
-Service
-
-CTA type (WhatsApp/Book/Call)
-
-Evidence snippet = exact text match
-
-Store in clinic_offers, clinic_ctas with URL/page reference.
-
-Outputs
-
-evidence-backed commercial intel
-
-Workflow 7 — Competitor Scoring (visibility + site strength)
-Goal: convert signals into rankings.
-
-Inputs
-
-serp_results (rankings)
-
-clinic_offers presence
-
-site inventory completeness
-
-SEO hygiene signals (schema, canonical, etc.)
-
-Outputs
-
-clinics.competitor_score
-
-per-vertical leaderboards
-
-Workflow 8 — Monitoring + Expansion Loop
-Goal: keep data fresh + discover new competitors.
+### W8 — Monitoring + Expansion
+**Goal:** keep the dataset fresh and discover new competitors.
 
 Cadence:
-
-Daily: Tier A SERPs
-
-Weekly: Tier B SERPs
-
-Monthly: refresh discovery for domains
-
-Continuous: crawl due pages
-
-Continuous: enrich changed pages
+- Daily: Tier A SERPs + crawl due pages
+- Weekly: Tier B SERPs
+- Monthly: refresh discovery per domain
 
 Expansion:
+- Auto-enqueue new domains from SERP into discovery queue
 
-auto-add new domains from SERPs into discovery queue
+---
 
-4) One-Click Trigger (O-Run Orchestrator)
-Instead of manually triggering 8 workflows, make one orchestrator.
+## 5) Operational Defaults (So Runs Stay “Smooth”)
 
-Input: vertical(s), mode (smoke/full), budgets
-Action: creates run_id, then enqueues jobs in order:
+**Retry policy**
+- 3 attempts, exponential backoff
+- Final state: `needs_review` with reason code (never silent failure)
 
-build_queries (W1)
+**Run budgets (starting point)**
+- Queries/vertical/run: **200**
+- SERP calls/run: **150 (smoke)** / **300 (full)**
+- New domains/run: **50**
+- Crawl pages/run: **50** (breadth-first)
 
-serp_snapshot (W2A)
+**Run KPIs to record every time**
+- Domains discovered / new
+- Domains with ≥1 crawled real page (coverage)
+- Pages crawled (real vs sitemap)
+- % fetch success, % blocked, top failure reasons
+- Pages enriched (SEO), pages with keywords, clinics with rollups
+- Commercial facts extracted (offers/ctas) + evidence pass rate
 
-seed_clinics_keywords (W2B/W2C)
+---
 
-domain_discovery (W3)
+## 6) Sanity Checks (What “Good” Looks Like)
 
-crawl_pages (W4)
+After W1: `search_queries` has rows for all 4 verticals.
 
-seo_enrich_keywords (W5)
+After W2: `serp_snapshots`, `serp_results`, `domains`, `clinics` populated.
 
-commercial_extract (W6)
+After W3: `pages` count increases per domain; key URLs exist.
 
-score (W7)
+After W4:
+- `page_content` is mostly **real pages** (not sitemaps)
+- Many domains have ≥1 crawled page (coverage rising)
 
-Success condition: queue drained + asserts pass.
+After W5:
+- `page_seo.title/meta/h1` are meaningfully non-empty on normal HTML pages
+- `clinic_keywords` covers a healthy portion of clinics
 
-This is the mechanism that makes “Trigger Workflow = smooth run” true.
+After W6:
+- offers/CTAs appear with evidence snippets (failed evidence checks ≈ 0)
 
-5) Practical Defaults (Caps)
-max search queries per vertical per run: 200
+After W7:
+- leaderboards / battlecards are queryable by vertical
 
-max SERP calls per run: 100–300
+---
 
-max new domains seeded per run: 50
+## 7) Lessons Learned (Current Pitfall to Avoid)
 
-max pages per domain to crawl initially: 50
+If you see “only a few clinics have keywords”, it almost always means:
+- W4 coverage is too narrow (few domains crawled), **or**
+- W5B is running on sitemap-like URLs, **or**
+- W5B selection gates are too strict.
 
-prioritize /services, /treatments, /contact, /pricing
-
-per-domain concurrency: 1
-
-retry policy: 3 attempts, exponential backoff, then mark “needs review”
-
-6) Sanity Checks (Expected DB State After Each Workflow)
-After W1: search_queries has rows for all 4 verticals ✅
-
-After W2: serp_snapshots, serp_results, domains, clinics populated ✅
-
-After W3: pages count jumps per domain ✅
-
-After W4: page_content filled, content_hash present, fetch logs show success rates ✅
-
-After W5: page_seo, page_keywords, clinic_keywords populated ✅
-
-After W6: offers + CTAs show up with evidence ✅
-
-After W7: competitor score tables filled ✅
+Fix order:
+1) Make W4 breadth-first and high-intent-first
+2) Make W5B select only real pages with meaningful text
+3) Then scale batch sizes

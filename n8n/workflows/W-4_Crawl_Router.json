@@ -1,0 +1,356 @@
+{
+    "name": "W-4: Crawl Router",
+    "nodes": [
+        {
+            "parameters": {},
+            "id": "w4-trigger",
+            "name": "Manual Trigger",
+            "type": "n8n-nodes-base.manualTrigger",
+            "typeVersion": 1,
+            "position": [
+                100,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "-- BREADTH-FIRST CRAWL: Pick 1 best page per domain, up to 50 domains\n-- Phase 1: Select domains with uncrawled high-intent pages first\nWITH domain_priority AS (\n  SELECT DISTINCT ON (p.domain_id)\n    p.id as page_id,\n    p.url,\n    p.domain_id,\n    d.domain,\n    d.clinic_id,\n    -- Priority score: high-intent pages score 0, others score 1\n    CASE \n      WHEN p.url ~* '/(pricing|price|rates|fees|cost|trial|promo|package)' THEN 0\n      WHEN p.url ~* '/(services|treatments|service|therapy)' THEN 1\n      WHEN p.url ~* '/(contact|book|appointment|schedule|whatsapp)' THEN 2\n      WHEN p.url ~* '/(about|team|our-story|clinic)' THEN 3\n      ELSE 4\n    END as priority_score\n  FROM wellness.pages p\n  JOIN wellness.domains d ON p.domain_id = d.id\n  WHERE \n    -- Uncrawled or stale (7+ days)\n    (p.last_crawled_at IS NULL OR p.last_crawled_at < NOW() - INTERVAL '7 days')\n    -- Valid URL\n    AND p.url IS NOT NULL AND p.url != ''\n    -- Exclude sitemap patterns (URL-based)\n    AND p.url NOT ILIKE '%sitemap%'\n    AND p.url NOT ILIKE '%/sitemap%'\n    AND p.url !~* '(sitemap|sitemap_index|sitemap-index).*\\.xml$'\n    AND p.url !~* '(post-sitemap|page-sitemap|category-sitemap|tag-sitemap|author-sitemap)'\n    -- Valid domain\n    AND d.domain IS NOT NULL\n  -- Pick the BEST page per domain (lowest priority_score, then oldest crawl)\n  ORDER BY p.domain_id, \n    CASE \n      WHEN p.url ~* '/(pricing|price|rates|fees|cost|trial|promo|package)' THEN 0\n      WHEN p.url ~* '/(services|treatments|service|therapy)' THEN 1\n      WHEN p.url ~* '/(contact|book|appointment|schedule|whatsapp)' THEN 2\n      WHEN p.url ~* '/(about|team|our-story|clinic)' THEN 3\n      ELSE 4\n    END,\n    p.last_crawled_at NULLS FIRST\n)\nSELECT page_id, url, domain_id, domain, clinic_id, priority_score\nFROM domain_priority\nORDER BY priority_score, domain\nLIMIT 50;"
+            },
+            "id": "w4-get-pages",
+            "name": "Get Pages",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.6,
+            "position": [
+                300,
+                300
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "postgres-creds-id",
+                    "name": "Postgres account"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "batchSize": 1,
+                "options": {}
+            },
+            "id": "w4-split",
+            "name": "Split Pages",
+            "type": "n8n-nodes-base.splitInBatches",
+            "typeVersion": 3,
+            "position": [
+                500,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "jsCode": "// Throttle: 2 second delay between requests\nconst data = $input.item.json;\nawait new Promise(resolve => setTimeout(resolve, 2000));\n\nreturn [{ json: { \n  page_id: data.page_id, \n  url: data.url, \n  domain_id: data.domain_id,\n  domain: data.domain,\n  clinic_id: data.clinic_id || null,\n  priority_score: data.priority_score || 4\n}}];"
+            },
+            "id": "w4-prep",
+            "name": "Prep and Throttle",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                700,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "url": "={{ $json.url }}",
+                "options": {
+                    "timeout": 30000,
+                    "response": {
+                        "response": {
+                            "fullResponse": true
+                        }
+                    }
+                },
+                "headerParametersUi": {
+                    "parameter": [
+                        {
+                            "name": "User-Agent",
+                            "value": "Mozilla/5.0 (compatible; AMI-Bot/1.0; +https://awhl.sg)"
+                        },
+                        {
+                            "name": "Accept",
+                            "value": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+                        }
+                    ]
+                }
+            },
+            "id": "w4-fetch",
+            "name": "Fetch Page",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4.2,
+            "position": [
+                900,
+                300
+            ],
+            "continueOnFail": true
+        },
+        {
+            "parameters": {
+                "jsCode": "// Process HTTP response\nconst resp = $input.item.json;\n\n// Context Recovery from Prep node\nconst prepData = $('Prep and Throttle').item.json;\nconst url = prepData.url;\nconst page_id = prepData.page_id;\nconst domain = prepData.domain;\n\nlet statusCode = resp.statusCode || 200;\nlet htmlBody = '';\nlet error = null;\n\nif (resp.error) {\n  error = resp.error.message || String(resp.error);\n  statusCode = resp.statusCode || 0;\n} else {\n  htmlBody = resp.body || resp.data || '';\n  if (typeof htmlBody === 'object' && htmlBody !== null) {\n    htmlBody = JSON.stringify(htmlBody);\n  } else if (typeof resp === 'string' && !htmlBody) {\n    htmlBody = resp;\n  }\n}\n\n// Cap HTML at 200KB\nhtmlBody = htmlBody.substring(0, 200000);\nlet bytesReceived = htmlBody ? htmlBody.length : 0;\n\n// Quality gate checks\nlet qualityGateFailed = false;\nlet qualityReason = '';\nlet isSitemap = false;\n\nif (!htmlBody) {\n  qualityGateFailed = true;\n  qualityReason = 'empty_response';\n} else if (htmlBody.length < 500) {\n  qualityGateFailed = true;\n  qualityReason = 'too_short';\n} else if (htmlBody.trim().startsWith('<?xml') && (htmlBody.includes('<urlset') || htmlBody.includes('<sitemapindex'))) {\n  // Sitemap XML detected - mark as crawled but skip downstream\n  qualityGateFailed = true;\n  qualityReason = 'sitemap_xml';\n  isSitemap = true;\n} else if (!htmlBody.includes('<') && !htmlBody.includes('>')) {\n  qualityGateFailed = true;\n  qualityReason = 'not_html';\n} else if (statusCode === 403 || htmlBody.toLowerCase().includes('access denied') || htmlBody.toLowerCase().includes('403 forbidden')) {\n  qualityGateFailed = true;\n  qualityReason = 'blocked';\n} else if (statusCode === 404) {\n  qualityGateFailed = true;\n  qualityReason = 'not_found';\n} else if (statusCode >= 500) {\n  qualityGateFailed = true;\n  qualityReason = 'server_error';\n}\n\nreturn [{ json: { \n  url, page_id, domain,\n  statusCode, htmlBody, bytesReceived, error,\n  qualityGateFailed, qualityReason, isSitemap,\n  fetchMethod: 'http'\n}}];"
+            },
+            "id": "w4-process",
+            "name": "Process Response",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1100,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "conditions": {
+                    "boolean": [
+                        {
+                            "value1": "={{ $json.qualityGateFailed !== true }}",
+                            "value2": true
+                        }
+                    ]
+                }
+            },
+            "id": "w4-quality-check",
+            "name": "Quality Check",
+            "type": "n8n-nodes-base.if",
+            "typeVersion": 2,
+            "position": [
+                1300,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "jsCode": "// Extract content and compute normalized markdown hash\nconst data = $input.item.json;\nconst html = data.htmlBody || '';\n\nfunction stripHtml(htmlStr) {\n  return htmlStr\n    .replace(/<script[^>]*>[\\s\\S]*?<\\/script>/gi, '')\n    .replace(/<style[^>]*>[\\s\\S]*?<\\/style>/gi, '')\n    .replace(/<nav[^>]*>[\\s\\S]*?<\\/nav>/gi, '')\n    .replace(/<footer[^>]*>[\\s\\S]*?<\\/footer>/gi, '')\n    .replace(/<header[^>]*>[\\s\\S]*?<\\/header>/gi, '')\n    .replace(/<[^>]+>/g, ' ')\n    .replace(/\\s+/g, ' ')\n    .trim();\n}\n\nconst textContent = stripHtml(html);\nconst wordCount = textContent.split(/\\s+/).filter(w => w.length > 0).length;\n\n// Normalize markdown for stable hashing: collapse whitespace, trim, lowercase for hash\nconst markdown = textContent.substring(0, 100000);\nconst normalizedForHash = markdown.replace(/\\s+/g, ' ').trim().toLowerCase();\n\nreturn [{ json: {\n  ...data,\n  markdown,\n  normalizedForHash,\n  wordCount\n}}];"
+            },
+            "id": "w4-extract",
+            "name": "Extract Content",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1500,
+                200
+            ]
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "WITH computed_hash AS (\n  SELECT encode(sha256($3::bytea), 'hex') as content_hash\n),\nfetch_log AS (\n  INSERT INTO wellness.page_fetches (page_id, status_code, fetch_method, fetch_provider, bytes_received, quality_gate_failed)\n  VALUES ($4::uuid, $5, 'http', 'n8n_http', $6, false)\n  RETURNING page_id\n),\ncontent_upsert AS (\n  INSERT INTO wellness.page_content (page_id, content_hash, markdown, word_count, html_body)\n  SELECT $4::uuid, ch.content_hash, $1, $7, $2\n  FROM computed_hash ch\n  ON CONFLICT (page_id, content_hash) DO UPDATE SET\n    markdown = EXCLUDED.markdown,\n    html_body = EXCLUDED.html_body,\n    word_count = EXCLUDED.word_count\n  RETURNING page_id, content_hash\n)\nUPDATE wellness.pages \nSET last_crawled_at = NOW(), \n    last_http_status = $5, \n    content_hash = (SELECT substring(content_hash from 1 for 16) FROM content_upsert)\nWHERE id = $4::uuid\nRETURNING id as page_id;",
+                "options": {
+                    "queryReplacement": "={{ [$json.markdown, $json.htmlBody, $json.normalizedForHash, $json.page_id, $json.statusCode, $json.bytesReceived, $json.wordCount] }}"
+                }
+            },
+            "id": "w4-store",
+            "name": "Store Content",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.6,
+            "position": [
+                1700,
+                200
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "postgres-creds-id",
+                    "name": "Postgres account"
+                }
+            },
+            "continueOnFail": true
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "INSERT INTO wellness.page_fetches (page_id, status_code, fetch_method, fetch_provider, bytes_received, error_message, quality_gate_failed)\nVALUES ($1::uuid, $2, 'http', 'n8n_http', $3, $4, true);\n\nUPDATE wellness.pages SET last_crawled_at = NOW(), last_http_status = $2 WHERE id = $1::uuid;",
+                "options": {
+                    "queryReplacement": "={{ [$json.page_id, $json.statusCode || 0, $json.bytesReceived || 0, ($json.qualityReason || $json.error || 'quality_gate_failed').substring(0, 500)] }}"
+                }
+            },
+            "id": "w4-log-fail",
+            "name": "Log Failed Fetch",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.6,
+            "position": [
+                1500,
+                400
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "postgres-creds-id",
+                    "name": "Postgres account"
+                }
+            },
+            "continueOnFail": true
+        },
+        {
+            "parameters": {
+                "jsCode": "// Continue to next batch item\nreturn [{ json: { processed: true } }];"
+            },
+            "id": "w4-continue",
+            "name": "Continue",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1900,
+                300
+            ]
+        },
+        {
+            "parameters": {},
+            "id": "w4-noop",
+            "name": "Done",
+            "type": "n8n-nodes-base.noOp",
+            "typeVersion": 1,
+            "position": [
+                700,
+                450
+            ]
+        }
+    ],
+    "connections": {
+        "Manual Trigger": {
+            "main": [
+                [
+                    {
+                        "node": "Get Pages",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Get Pages": {
+            "main": [
+                [
+                    {
+                        "node": "Split Pages",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Split Pages": {
+            "main": [
+                [
+                    {
+                        "node": "Prep and Throttle",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                [
+                    {
+                        "node": "Done",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Prep and Throttle": {
+            "main": [
+                [
+                    {
+                        "node": "Fetch Page",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Fetch Page": {
+            "main": [
+                [
+                    {
+                        "node": "Process Response",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Process Response": {
+            "main": [
+                [
+                    {
+                        "node": "Quality Check",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Quality Check": {
+            "main": [
+                [
+                    {
+                        "node": "Extract Content",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                [
+                    {
+                        "node": "Log Failed Fetch",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Extract Content": {
+            "main": [
+                [
+                    {
+                        "node": "Store Content",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Store Content": {
+            "main": [
+                [
+                    {
+                        "node": "Continue",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Log Failed Fetch": {
+            "main": [
+                [
+                    {
+                        "node": "Continue",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Continue": {
+            "main": [
+                [
+                    {
+                        "node": "Split Pages",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        }
+    },
+    "settings": {
+        "executionOrder": "v1"
+    },
+    "active": false
+}
