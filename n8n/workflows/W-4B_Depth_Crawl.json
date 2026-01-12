@@ -1,0 +1,381 @@
+{
+    "name": "W-4B: Depth Crawl (Batch Loop)",
+    "nodes": [
+        {
+            "parameters": {},
+            "id": "w4b-trigger",
+            "name": "Manual Trigger",
+            "type": "n8n-nodes-base.manualTrigger",
+            "typeVersion": 1,
+            "position": [
+                100,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "-- DEPTH CRAWL: 500 uncrawled pages, prioritized by intent\nSELECT\n  p.id as page_id,\n  p.url,\n  p.domain_id,\n  d.domain,\n  d.clinic_id,\n  CASE \n    WHEN p.url ~* '/(pricing|price|rates|fees|cost|trial|promo|package)' THEN 0\n    WHEN p.url ~* '/(services|treatments|service|therapy)' THEN 1\n    WHEN p.url ~* '/(contact|book|appointment|schedule|whatsapp)' THEN 2\n    WHEN p.url ~* '/(about|team|our-story|clinic)' THEN 3\n    ELSE 4\n  END as priority_score\nFROM wellness.pages p\nJOIN wellness.domains d ON p.domain_id = d.id\nWHERE \n  (p.last_crawled_at IS NULL OR p.last_crawled_at < NOW() - INTERVAL '7 days')\n  AND p.url IS NOT NULL AND p.url != ''\n  AND p.url NOT ILIKE '%sitemap%'\n  AND p.url NOT ILIKE '%.jpg' AND p.url NOT ILIKE '%.png'\n  AND p.url NOT ILIKE '%.gif' AND p.url NOT ILIKE '%.pdf'\n  AND p.url NOT ILIKE '%.css' AND p.url NOT ILIKE '%.js'\n  AND d.domain IS NOT NULL\nORDER BY \n  CASE \n    WHEN p.url ~* '/(pricing|price|rates|fees|cost|trial|promo|package)' THEN 0\n    WHEN p.url ~* '/(services|treatments|service|therapy)' THEN 1\n    WHEN p.url ~* '/(contact|book|appointment|schedule|whatsapp)' THEN 2\n    WHEN p.url ~* '/(about|team|our-story|clinic)' THEN 3\n    ELSE 4\n  END,\n  d.domain,\n  p.last_crawled_at NULLS FIRST\nLIMIT 500;"
+            },
+            "id": "w4b-get-pages",
+            "name": "Get Pages (Depth)",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.6,
+            "position": [
+                300,
+                300
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "postgres-creds-id",
+                    "name": "Postgres account"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "batchSize": 25,
+                "options": {}
+            },
+            "id": "w4b-batch",
+            "name": "Batch (25 pages)",
+            "type": "n8n-nodes-base.splitInBatches",
+            "typeVersion": 3,
+            "position": [
+                500,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "jsCode": "// Prep batch items - pass through with 500ms delay for politeness\nconst items = $input.all();\n\n// Small delay between batches\nawait new Promise(resolve => setTimeout(resolve, 500));\n\nreturn items.map(item => {\n  const data = item.json;\n  return { json: { \n    page_id: data.page_id, \n    url: data.url, \n    domain_id: data.domain_id,\n    domain: data.domain,\n    clinic_id: data.clinic_id || null,\n    priority_score: data.priority_score || 4\n  }};\n});"
+            },
+            "id": "w4b-prep",
+            "name": "Prep Batch",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                700,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "url": "={{ $json.url }}",
+                "options": {
+                    "timeout": 10000,
+                    "response": {
+                        "response": {
+                            "fullResponse": true
+                        }
+                    }
+                },
+                "headerParametersUi": {
+                    "parameter": [
+                        {
+                            "name": "User-Agent",
+                            "value": "Mozilla/5.0 (compatible; AMI-Bot/1.0; +https://awhl.sg)"
+                        },
+                        {
+                            "name": "Accept",
+                            "value": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+                        }
+                    ]
+                }
+            },
+            "id": "w4b-fetch",
+            "name": "Fetch Page",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4.2,
+            "position": [
+                900,
+                300
+            ],
+            "continueOnFail": true,
+            "onError": "continueRegularOutput"
+        },
+        {
+            "parameters": {
+                "jsCode": "// Process all HTTP responses in this batch\nreturn $input.all().map((inputItem, index) => {\n  const resp = inputItem.json;\n  \n  // Get context from Prep Batch node\n  const prepItems = $('Prep Batch').all();\n  const prepData = prepItems[index]?.json || {};\n  \n  const url = prepData.url || resp.url || '';\n  const page_id = prepData.page_id || '';\n  const domain = prepData.domain || '';\n\n  let statusCode = resp.statusCode || 200;\n  let htmlBody = '';\n  let error = null;\n\n  // Handle binary/image responses\n  if (resp.mimeType && !resp.mimeType.includes('text/html')) {\n    return { json: { \n      url, page_id, domain,\n      statusCode: 200, htmlBody: '', bytesReceived: 0, error: null,\n      qualityGateFailed: true, qualityReason: 'not_html_mimetype',\n      isSitemap: false, fetchMethod: 'http'\n    }};\n  }\n\n  if (resp.error) {\n    error = resp.error.message || String(resp.error);\n    statusCode = resp.statusCode || 0;\n  } else {\n    htmlBody = resp.body || resp.data || '';\n    if (typeof htmlBody === 'object' && htmlBody !== null) {\n      htmlBody = JSON.stringify(htmlBody);\n    }\n  }\n\n  htmlBody = String(htmlBody).substring(0, 200000);\n  let bytesReceived = htmlBody ? htmlBody.length : 0;\n\n  let qualityGateFailed = false;\n  let qualityReason = '';\n  let isSitemap = false;\n\n  if (!htmlBody) {\n    qualityGateFailed = true;\n    qualityReason = 'empty_response';\n  } else if (htmlBody.length < 500) {\n    qualityGateFailed = true;\n    qualityReason = 'too_short';\n  } else if (htmlBody.trim().startsWith('<?xml') && (htmlBody.includes('<urlset') || htmlBody.includes('<sitemapindex'))) {\n    qualityGateFailed = true;\n    qualityReason = 'sitemap_xml';\n    isSitemap = true;\n  } else if (!htmlBody.includes('<') && !htmlBody.includes('>')) {\n    qualityGateFailed = true;\n    qualityReason = 'not_html';\n  } else if (statusCode === 403) {\n    qualityGateFailed = true;\n    qualityReason = 'blocked';\n  } else if (statusCode === 404) {\n    qualityGateFailed = true;\n    qualityReason = 'not_found';\n  } else if (statusCode >= 500) {\n    qualityGateFailed = true;\n    qualityReason = 'server_error';\n  }\n\n  return { json: { \n    url, page_id, domain,\n    statusCode, htmlBody, bytesReceived, error,\n    qualityGateFailed, qualityReason, isSitemap,\n    fetchMethod: 'http'\n  }};\n});"
+            },
+            "id": "w4b-process",
+            "name": "Process Response",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1100,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "conditions": {
+                    "boolean": [
+                        {
+                            "value1": "={{ $json.qualityGateFailed !== true }}",
+                            "value2": true
+                        }
+                    ]
+                }
+            },
+            "id": "w4b-quality-check",
+            "name": "Quality Check",
+            "type": "n8n-nodes-base.if",
+            "typeVersion": 2,
+            "position": [
+                1300,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "jsCode": "// Extract content and compute normalized markdown hash\nreturn $input.all().map(inputItem => {\n  const data = inputItem.json;\n  const html = data.htmlBody || '';\n\n  function stripHtml(htmlStr) {\n    return htmlStr\n      .replace(/<script[^>]*>[\\s\\S]*?<\\/script>/gi, '')\n      .replace(/<style[^>]*>[\\s\\S]*?<\\/style>/gi, '')\n      .replace(/<nav[^>]*>[\\s\\S]*?<\\/nav>/gi, '')\n      .replace(/<footer[^>]*>[\\s\\S]*?<\\/footer>/gi, '')\n      .replace(/<header[^>]*>[\\s\\S]*?<\\/header>/gi, '')\n      .replace(/<[^>]+>/g, ' ')\n      .replace(/\\s+/g, ' ')\n      .trim();\n  }\n\n  const textContent = stripHtml(html);\n  const wordCount = textContent.split(/\\s+/).filter(w => w.length > 0).length;\n  const markdown = textContent.substring(0, 100000);\n  const normalizedForHash = markdown.replace(/\\s+/g, ' ').trim().toLowerCase();\n\n  return { json: {\n    ...data,\n    markdown,\n    normalizedForHash,\n    wordCount\n  }};\n});"
+            },
+            "id": "w4b-extract",
+            "name": "Extract Content",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1500,
+                200
+            ]
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "WITH computed_hash AS (\n  SELECT encode(sha256($3::bytea), 'hex') as content_hash\n),\nfetch_log AS (\n  INSERT INTO wellness.page_fetches (page_id, status_code, fetch_method, fetch_provider, bytes_received, quality_gate_failed)\n  VALUES ($4::uuid, $5, 'http', 'n8n_http', $6, false)\n  RETURNING page_id\n),\ncontent_upsert AS (\n  INSERT INTO wellness.page_content (page_id, content_hash, markdown, word_count, html_body)\n  SELECT $4::uuid, ch.content_hash, $1, $7, $2\n  FROM computed_hash ch\n  ON CONFLICT (page_id, content_hash) DO UPDATE SET\n    markdown = EXCLUDED.markdown,\n    html_body = EXCLUDED.html_body,\n    word_count = EXCLUDED.word_count\n  RETURNING page_id, content_hash\n)\nUPDATE wellness.pages \nSET last_crawled_at = NOW(), \n    last_http_status = $5, \n    content_hash = (SELECT substring(content_hash from 1 for 16) FROM content_upsert)\nWHERE id = $4::uuid\nRETURNING id as page_id;",
+                "options": {
+                    "queryReplacement": "={{ [$json.markdown, $json.htmlBody, $json.normalizedForHash, $json.page_id, $json.statusCode, $json.bytesReceived, $json.wordCount] }}"
+                }
+            },
+            "id": "w4b-store",
+            "name": "Store Content",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.6,
+            "position": [
+                1700,
+                200
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "postgres-creds-id",
+                    "name": "Postgres account"
+                }
+            },
+            "continueOnFail": true
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "INSERT INTO wellness.page_fetches (page_id, status_code, fetch_method, fetch_provider, bytes_received, error_message, quality_gate_failed)\nVALUES ($1::uuid, $2, 'http', 'n8n_http', $3, $4, true);\n\nUPDATE wellness.pages SET last_crawled_at = NOW(), last_http_status = $2 WHERE id = $1::uuid;",
+                "options": {
+                    "queryReplacement": "={{ [$json.page_id, $json.statusCode || 0, $json.bytesReceived || 0, ($json.qualityReason || $json.error || 'quality_gate_failed').substring(0, 500)] }}"
+                }
+            },
+            "id": "w4b-log-fail",
+            "name": "Log Failed Fetch",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.6,
+            "position": [
+                1500,
+                400
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "postgres-creds-id",
+                    "name": "Postgres account"
+                }
+            },
+            "continueOnFail": true
+        },
+        {
+            "parameters": {
+                "jsCode": "// Merge results and continue to next batch\nconst stored = $('Store Content').all();\nconst failed = $('Log Failed Fetch').all();\nconst total = stored.length + failed.length;\n\nreturn [{ json: { \n  batchComplete: true,\n  stored: stored.length,\n  failed: failed.length,\n  total: total\n}}];"
+            },
+            "id": "w4b-merge",
+            "name": "Merge Results",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1900,
+                300
+            ]
+        },
+        {
+            "parameters": {},
+            "id": "w4b-done",
+            "name": "Done",
+            "type": "n8n-nodes-base.noOp",
+            "typeVersion": 1,
+            "position": [
+                700,
+                500
+            ]
+        },
+        {
+            "parameters": {
+                "jsCode": "// Summary of all batches\nconst allResults = $input.all();\nconst totalStored = allResults.reduce((sum, item) => sum + (item.json.stored || 0), 0);\nconst totalFailed = allResults.reduce((sum, item) => sum + (item.json.failed || 0), 0);\n\nreturn [{ json: {\n  workflow: 'W-4B Depth Crawl',\n  timestamp: new Date().toISOString(),\n  totalPages: totalStored + totalFailed,\n  stored: totalStored,\n  failed: totalFailed,\n  status: 'complete'\n}}];"
+            },
+            "id": "w4b-summary",
+            "name": "Summary",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                900,
+                500
+            ]
+        }
+    ],
+    "connections": {
+        "Manual Trigger": {
+            "main": [
+                [
+                    {
+                        "node": "Get Pages (Depth)",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Get Pages (Depth)": {
+            "main": [
+                [
+                    {
+                        "node": "Batch (25 pages)",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Batch (25 pages)": {
+            "main": [
+                [
+                    {
+                        "node": "Prep Batch",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                [
+                    {
+                        "node": "Done",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Prep Batch": {
+            "main": [
+                [
+                    {
+                        "node": "Fetch Page",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Fetch Page": {
+            "main": [
+                [
+                    {
+                        "node": "Process Response",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Process Response": {
+            "main": [
+                [
+                    {
+                        "node": "Quality Check",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Quality Check": {
+            "main": [
+                [
+                    {
+                        "node": "Extract Content",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                [
+                    {
+                        "node": "Log Failed Fetch",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Extract Content": {
+            "main": [
+                [
+                    {
+                        "node": "Store Content",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Store Content": {
+            "main": [
+                [
+                    {
+                        "node": "Merge Results",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Log Failed Fetch": {
+            "main": [
+                [
+                    {
+                        "node": "Merge Results",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Merge Results": {
+            "main": [
+                [
+                    {
+                        "node": "Batch (25 pages)",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Done": {
+            "main": [
+                [
+                    {
+                        "node": "Summary",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        }
+    },
+    "settings": {
+        "executionOrder": "v1"
+    },
+    "active": false
+}

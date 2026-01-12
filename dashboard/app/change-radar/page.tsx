@@ -1,7 +1,7 @@
 import { Suspense } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
+import { FilterTabs } from '@/components/filter-controls';
 import { EventTimeline, AlertRules } from '@/components/event-timeline';
 import { getChangeRadarData } from '@/lib/queries/change-radar';
 import { Bell, Zap } from 'lucide-react';
@@ -14,6 +14,13 @@ interface ChangeRadarPageProps {
         eventType?: string;
     }>;
 }
+
+const eventTypeOptions = [
+    { value: 'all', label: 'All Events' },
+    { value: 'serp', label: 'SERP Movement' },
+    { value: 'offer', label: 'New Offers' },
+    { value: 'cta', label: 'CTA Changes' },
+];
 
 async function ChangeRadarContent({ searchParams }: ChangeRadarPageProps) {
     const params = await searchParams;
@@ -34,12 +41,11 @@ async function ChangeRadarContent({ searchParams }: ChangeRadarPageProps) {
             </div>
 
             {/* Filter tabs */}
-            <div className="flex gap-2">
-                <Badge variant="default">All Events</Badge>
-                <Badge variant="outline">SERP Movement</Badge>
-                <Badge variant="outline">New Offers</Badge>
-                <Badge variant="outline">CTA Changes</Badge>
-            </div>
+            <FilterTabs
+                paramName="eventType"
+                options={eventTypeOptions}
+                defaultValue="all"
+            />
 
             {/* Main grid */}
             <div className="grid gap-6 lg:grid-cols-3">

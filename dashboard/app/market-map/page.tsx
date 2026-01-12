@@ -15,6 +15,7 @@ interface MarketMapPageProps {
         topOnly?: string;
         hasTrialOffer?: string;
         hasWhatsApp?: string;
+        search?: string;
     }>;
 }
 
@@ -31,6 +32,7 @@ async function MarketMapContent({ searchParams }: MarketMapPageProps) {
         topOnly: params.topOnly === 'true',
         hasTrialOffer: params.hasTrialOffer === 'true',
         hasWhatsApp: params.hasWhatsApp === 'true',
+        search: params.search,
     });
 
     return (

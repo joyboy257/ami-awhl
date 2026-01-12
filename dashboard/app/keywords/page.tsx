@@ -1,6 +1,5 @@
 import { Suspense } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import {
@@ -11,8 +10,11 @@ import {
     TableHeader,
     TableRow,
 } from '@/components/ui/table';
+import { Badge } from '@/components/ui/badge';
+import { FilterTabs, Pagination } from '@/components/filter-controls';
+import { Tooltip, MetricTooltips } from '@/components/tooltip';
 import { getKeywordsData } from '@/lib/queries/keywords';
-import { Search, Download, TrendingUp, Crown } from 'lucide-react';
+import { Search, Download, Crown } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface KeywordsPageProps {
@@ -22,6 +24,13 @@ interface KeywordsPageProps {
         page?: string;
     }>;
 }
+
+const tierOptions = [
+    { value: 'all', label: 'All Tiers', tooltip: 'Show all keyword tiers' },
+    { value: 'A', label: 'Tier A', tooltip: MetricTooltips.tierA },
+    { value: 'B', label: 'Tier B', tooltip: MetricTooltips.tierB },
+    { value: 'C', label: 'Tier C', tooltip: MetricTooltips.tierC },
+];
 
 function TierBadge({ tier }: { tier: string }) {
     const colors: Record<string, string> = {
@@ -39,11 +48,14 @@ function TierBadge({ tier }: { tier: string }) {
 
 async function KeywordsContent({ searchParams }: KeywordsPageProps) {
     const params = await searchParams;
+    const currentPage = parseInt(params.page ?? '1', 10);
+    const pageSize = 20;
+
     const data = await getKeywordsData({
         vertical: params.vertical,
         tier: params.tier,
-        page: parseInt(params.page ?? '1', 10),
-        pageSize: 20,
+        page: currentPage,
+        pageSize,
     });
 
     return (
@@ -63,12 +75,11 @@ async function KeywordsContent({ searchParams }: KeywordsPageProps) {
             </div>
 
             {/* Filter tabs */}
-            <div className="flex gap-2">
-                <Badge variant="default">All Tiers</Badge>
-                <Badge variant="outline">Tier A</Badge>
-                <Badge variant="outline">Tier B</Badge>
-                <Badge variant="outline">Tier C</Badge>
-            </div>
+            <FilterTabs
+                paramName="tier"
+                options={tierOptions}
+                defaultValue="all"
+            />
 
             {/* Keywords table */}
             <Card>
@@ -84,58 +95,79 @@ async function KeywordsContent({ searchParams }: KeywordsPageProps) {
                             <p className="text-muted-foreground">No keywords found.</p>
                         </div>
                     ) : (
-                        <div className="rounded-lg border">
-                            <Table>
-                                <TableHeader>
-                                    <TableRow>
-                                        <TableHead>Keyword</TableHead>
-                                        <TableHead className="w-24">Tier</TableHead>
-                                        <TableHead className="w-32">Vertical</TableHead>
-                                        <TableHead className="w-24 text-right">Snapshots</TableHead>
-                                        <TableHead className="w-48">Top Rank</TableHead>
-                                        <TableHead className="w-32">Last Check</TableHead>
-                                    </TableRow>
-                                </TableHeader>
-                                <TableBody>
-                                    {data.keywords.map((kw) => (
-                                        <TableRow key={kw.id}>
-                                            <TableCell className="font-medium">{kw.query_text}</TableCell>
-                                            <TableCell>
-                                                <TierBadge tier={kw.priority_tier} />
-                                            </TableCell>
-                                            <TableCell className="text-muted-foreground">
-                                                {kw.vertical_name}
-                                            </TableCell>
-                                            <TableCell className="text-right tabular-nums">
-                                                {kw.snapshot_count}
-                                            </TableCell>
-                                            <TableCell>
-                                                {kw.top_clinic_name ? (
-                                                    <div className="flex items-center gap-2">
-                                                        {kw.top_clinic_rank === 1 && (
-                                                            <Crown className="h-4 w-4 text-warning" />
-                                                        )}
-                                                        <span className="truncate max-w-[120px]">
-                                                            {kw.top_clinic_name}
-                                                        </span>
-                                                        <span className="text-muted-foreground text-sm">
-                                                            #{kw.top_clinic_rank}
-                                                        </span>
-                                                    </div>
-                                                ) : (
-                                                    <span className="text-muted-foreground">—</span>
-                                                )}
-                                            </TableCell>
-                                            <TableCell className="text-muted-foreground">
-                                                {kw.last_snapshot_at
-                                                    ? new Date(kw.last_snapshot_at).toLocaleDateString()
-                                                    : '—'}
-                                            </TableCell>
+                        <>
+                            <div className="rounded-lg border">
+                                <Table>
+                                    <TableHeader>
+                                        <TableRow>
+                                            <TableHead>Keyword</TableHead>
+                                            <TableHead className="w-24">
+                                                <Tooltip content="Priority tier based on search intent and commercial value">
+                                                    Tier
+                                                </Tooltip>
+                                            </TableHead>
+                                            <TableHead className="w-32">Vertical</TableHead>
+                                            <TableHead className="w-24 text-right">
+                                                <Tooltip content="Number of SERP snapshots captured for this keyword">
+                                                    Snapshots
+                                                </Tooltip>
+                                            </TableHead>
+                                            <TableHead className="w-48">
+                                                <Tooltip content={MetricTooltips.rankPosition}>
+                                                    Top Rank
+                                                </Tooltip>
+                                            </TableHead>
+                                            <TableHead className="w-32">Last Check</TableHead>
                                         </TableRow>
-                                    ))}
-                                </TableBody>
-                            </Table>
-                        </div>
+                                    </TableHeader>
+                                    <TableBody>
+                                        {data.keywords.map((kw) => (
+                                            <TableRow key={kw.id}>
+                                                <TableCell className="font-medium">{kw.query_text}</TableCell>
+                                                <TableCell>
+                                                    <TierBadge tier={kw.priority_tier} />
+                                                </TableCell>
+                                                <TableCell className="text-muted-foreground">
+                                                    {kw.vertical_name}
+                                                </TableCell>
+                                                <TableCell className="text-right tabular-nums">
+                                                    {kw.snapshot_count}
+                                                </TableCell>
+                                                <TableCell>
+                                                    {kw.top_clinic_name ? (
+                                                        <div className="flex items-center gap-2">
+                                                            {kw.top_clinic_rank === 1 && (
+                                                                <Crown className="h-4 w-4 text-warning" />
+                                                            )}
+                                                            <span className="truncate max-w-[120px]">
+                                                                {kw.top_clinic_name}
+                                                            </span>
+                                                            <span className="text-muted-foreground text-sm">
+                                                                #{kw.top_clinic_rank}
+                                                            </span>
+                                                        </div>
+                                                    ) : (
+                                                        <span className="text-muted-foreground">—</span>
+                                                    )}
+                                                </TableCell>
+                                                <TableCell className="text-muted-foreground">
+                                                    {kw.last_snapshot_at
+                                                        ? new Date(kw.last_snapshot_at).toLocaleDateString()
+                                                        : '—'}
+                                                </TableCell>
+                                            </TableRow>
+                                        ))}
+                                    </TableBody>
+                                </Table>
+                            </div>
+
+                            {/* Pagination */}
+                            <Pagination
+                                currentPage={currentPage}
+                                totalCount={data.totalCount}
+                                pageSize={pageSize}
+                            />
+                        </>
                     )}
                 </CardContent>
             </Card>

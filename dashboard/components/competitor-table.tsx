@@ -8,6 +8,7 @@ import { Badge } from '@/components/ui/badge';
 import { DataTable, type Column } from '@/components/data-table';
 import { ScoreBadge } from '@/components/score-badge';
 import { VisibilityBar } from '@/components/visibility-bar';
+import { Tooltip, MetricTooltips } from '@/components/tooltip';
 import { useFilters } from '@/hooks/use-filters';
 import { Download, MessageCircle, Tag } from 'lucide-react';
 import type { CompetitorRow } from '@/lib/types';
@@ -35,35 +36,35 @@ export function CompetitorTable({ data, totalCount, pageSize }: CompetitorTableP
         },
         {
             key: 'score',
-            header: 'Score',
+            header: <Tooltip content={MetricTooltips.competitorScore}>Score</Tooltip>,
             sortable: true,
             className: 'w-20',
             render: (row) => <ScoreBadge score={row.score} />,
         },
         {
             key: 'serpVisibility',
-            header: 'SERP Visibility',
+            header: <Tooltip content="Percentage of tracked keywords where this domain appears in top 10 Google results">SERP Visibility</Tooltip>,
             sortable: true,
             className: 'w-40',
             render: (row) => <VisibilityBar percent={row.serpVisibility} />,
         },
         {
             key: 'pageCount',
-            header: 'Pages',
+            header: <Tooltip content={MetricTooltips.pageCount}>Pages</Tooltip>,
             sortable: true,
             className: 'w-20 text-right',
             render: (row) => <span className="tabular-nums">{row.pageCount}</span>,
         },
         {
             key: 'seoHygiene',
-            header: 'SEO Hygiene',
+            header: <Tooltip content="SEO quality score based on meta tags, headings, alt text, and page speed signals">SEO Hygiene</Tooltip>,
             sortable: true,
             className: 'w-24 text-right',
             render: (row) => <span className="tabular-nums">{row.seoHygiene}%</span>,
         },
         {
             key: 'indicators',
-            header: 'Indicators',
+            header: <Tooltip content="Key signals: Trial offers (first-time discounts), WhatsApp CTAs (direct messaging)">Indicators</Tooltip>,
             className: 'w-32',
             render: (row) => (
                 <div className="flex gap-1">

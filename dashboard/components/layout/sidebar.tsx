@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import {
     Home,
+    Building2,
     Map,
     Search,
     DollarSign,
@@ -15,6 +16,7 @@ import { cn } from '@/lib/utils';
 
 const navItems = [
     { href: '/', label: 'Home', icon: Home },
+    { href: '/awhl', label: 'AWHL Brands', icon: Building2, highlight: true },
     { href: '/market-map', label: 'Market Map', icon: Map },
     { href: '/keywords', label: 'Keywords', icon: Search },
     { href: '/offers', label: 'Offers & Pricing', icon: DollarSign },

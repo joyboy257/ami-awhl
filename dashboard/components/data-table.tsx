@@ -17,7 +17,7 @@ import { ChevronUp, ChevronDown, ChevronsUpDown, ChevronLeft, ChevronRight } fro
 
 export interface Column<T> {
     key: string;
-    header: string;
+    header: React.ReactNode;
     sortable?: boolean;
     className?: string;
     render?: (row: T) => React.ReactNode;

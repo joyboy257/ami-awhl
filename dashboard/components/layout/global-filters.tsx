@@ -39,13 +39,21 @@ function GlobalFiltersInner() {
 
     return (
         <div className="flex items-center gap-4">
-            {/* Search box placeholder */}
+            {/* Search box - navigates to market map with search */}
             <div className="relative hidden md:block">
                 <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                 <input
                     type="text"
                     placeholder="Search clinics..."
                     className="h-9 w-64 rounded-md border border-input bg-background pl-9 pr-4 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                    onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                            const value = (e.target as HTMLInputElement).value;
+                            if (value.trim()) {
+                                window.location.href = `/market-map?search=${encodeURIComponent(value)}`;
+                            }
+                        }
+                    }}
                 />
             </div>
 

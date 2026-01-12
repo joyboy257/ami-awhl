@@ -15,6 +15,7 @@ export async function GET(request: NextRequest) {
             hasTrialOffer: searchParams.get('hasTrialOffer') === 'true',
             hasWhatsApp: searchParams.get('hasWhatsApp') === 'true',
             topOnly: searchParams.get('topOnly') === 'true',
+            search: searchParams.get('search') ?? undefined,
         };
 
         const data = await getMarketMapData(params);
