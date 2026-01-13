@@ -119,7 +119,19 @@ export async function getMarketMapData(params: QueryParams): Promise<MarketMapDT
         c.score_confidence,
         (SELECT count(*) FROM wellness.pages p WHERE p.domain_id = d.id)::text as page_count,
         COALESCE((c.score_breakdown->'visibility'->>'normalized')::numeric, 0) as serp_visibility,
-        COALESCE((c.score_breakdown->'technical'->>'score')::numeric, 0) as seo_hygiene,
+        -- Real SEO Hygiene score from page_seo data (0-100)
+        -- Based on: title (25%), meta_description (25%), h1 (25%), canonical (25%)
+        COALESCE((
+          SELECT ROUND(AVG(
+            (CASE WHEN ps.title IS NOT NULL AND ps.title != '' THEN 25 ELSE 0 END) +
+            (CASE WHEN ps.meta_description IS NOT NULL AND ps.meta_description != '' THEN 25 ELSE 0 END) +
+            (CASE WHEN ps.h1 IS NOT NULL AND ps.h1 != '' THEN 25 ELSE 0 END) +
+            (CASE WHEN ps.canonical_url IS NOT NULL AND ps.canonical_url != '' AND ps.canonical_url NOT LIKE '%sitemap%' THEN 25 ELSE 0 END)
+          ))
+          FROM wellness.page_seo ps
+          JOIN wellness.pages pg ON ps.page_id = pg.id
+          WHERE pg.domain_id = d.id
+        ), 0) as seo_hygiene,
         EXISTS (
           SELECT 1 FROM wellness.clinic_offers o 
           WHERE o.clinic_id = c.id AND o.offer_type = 'trial'

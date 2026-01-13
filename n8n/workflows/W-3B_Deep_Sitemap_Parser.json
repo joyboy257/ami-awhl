@@ -1,0 +1,346 @@
+{
+    "name": "W-3B: Deep Sitemap Parser",
+    "nodes": [
+        {
+            "parameters": {},
+            "id": "w3b-trigger",
+            "name": "Manual Trigger",
+            "type": "n8n-nodes-base.manualTrigger",
+            "typeVersion": 1,
+            "position": [
+                100,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "-- Get domains that have sitemap URLs but may have missed child sitemaps\n-- Focus on domains that have sitemap URLs in pages table\nSELECT DISTINCT d.id as domain_id, d.domain\nFROM wellness.domains d\nJOIN wellness.pages p ON p.domain_id = d.id\nWHERE p.page_type = 'sitemap'\n  AND d.domain IS NOT NULL\nORDER BY d.domain\nLIMIT 50;"
+            },
+            "id": "w3b-get-domains",
+            "name": "Get Domains with Sitemaps",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.6,
+            "position": [
+                300,
+                300
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "postgres-creds-id",
+                    "name": "Postgres account"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "batchSize": 1,
+                "options": {}
+            },
+            "id": "w3b-split",
+            "name": "Split Domains",
+            "type": "n8n-nodes-base.splitInBatches",
+            "typeVersion": 3,
+            "position": [
+                500,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "jsCode": "// Get all sitemap URLs for this domain from the pages table\nconst d = $input.item.json;\nreturn [{ json: { \n  domain_id: d.domain_id, \n  domain: d.domain,\n  phase: 'get_sitemaps'\n}}];"
+            },
+            "id": "w3b-prep",
+            "name": "Prep Domain",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                700,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "-- Get all sitemap URLs for this domain\nSELECT url FROM wellness.pages\nWHERE domain_id = $1::uuid AND page_type = 'sitemap'\nORDER BY url;",
+                "options": {
+                    "queryReplacement": "={{ [$json.domain_id] }}"
+                }
+            },
+            "id": "w3b-get-sitemaps",
+            "name": "Get Sitemap URLs",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.6,
+            "position": [
+                900,
+                300
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "postgres-creds-id",
+                    "name": "Postgres account"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "jsCode": "// Deep sitemap parser - fetches and recursively parses all sitemaps\n// Handles: sitemap index, urlset, gzip, namespaces\n\nconst prepData = $('Prep Domain').item.json;\nconst sitemapRows = $input.all();\nconst domain = prepData.domain;\nconst domain_id = prepData.domain_id;\n\n// Collect sitemap URLs from DB\nconst sitemapUrls = sitemapRows\n  .map(r => r.json.url)\n  .filter(u => u && u.includes('sitemap'));\n\nconsole.log(`[W-3B] Processing ${sitemapUrls.length} sitemaps for ${domain}`);\n\nlet allDiscoveredUrls = [];\nlet processedSitemaps = new Set();\n\n// Helper: Parse sitemap XML with namespace tolerance\nfunction parseSitemap(xml) {\n  const result = { urls: [], sitemaps: [] };\n  if (!xml || typeof xml !== 'string' || xml.length < 50) return result;\n  \n  // Clean XML\n  let clean = xml.replace(/<!\\[CDATA\\[/g, '').replace(/\\]\\]>/g, '');\n  \n  // Check if this is a sitemap index\n  const isSitemapIndex = clean.includes('<sitemapindex') || \n                         (clean.includes('<sitemap>') && !clean.includes('<urlset'));\n  \n  // Extract <loc> URLs - handle various namespace patterns\n  const locPattern = /<(?:[a-z0-9]+:)?loc>\\s*([^<]+)\\s*<\\/(?:[a-z0-9]+:)?loc>/gi;\n  let match;\n  while ((match = locPattern.exec(clean)) !== null) {\n    const url = match[1].trim();\n    if (url && url.startsWith('http')) {\n      // Is this a child sitemap or a content URL?\n      const isChildSitemap = url.endsWith('.xml') || \n                             url.endsWith('.xml.gz') || \n                             url.includes('sitemap');\n      \n      if (isSitemapIndex && isChildSitemap) {\n        result.sitemaps.push(url);\n      } else if (!isChildSitemap) {\n        result.urls.push(url);\n      } else if (!isSitemapIndex) {\n        // In a urlset, treat everything as content unless clearly a sitemap\n        result.urls.push(url);\n      }\n    }\n  }\n  \n  return result;\n}\n\n// Fetch helper\nasync function fetchSitemap(url) {\n  try {\n    const resp = await this.helpers.request({\n      method: 'GET',\n      url: url,\n      timeout: 15000,\n      headers: {\n        'User-Agent': 'Mozilla/5.0 (compatible; AMI-Bot/1.0)',\n        'Accept': 'application/xml, text/xml, */*',\n        'Accept-Encoding': 'gzip, deflate'\n      },\n      resolveWithFullResponse: false,\n      simple: false\n    });\n    \n    if (typeof resp === 'string') return resp;\n    if (resp && resp.body) return resp.body;\n    return '';\n  } catch (e) {\n    console.log(`[W-3B] Failed to fetch ${url}: ${e.message}`);\n    return '';\n  }\n}\n\n// Process all sitemaps recursively (max 3 levels)\nasync function processSitemap(url, depth = 0) {\n  if (depth > 3 || processedSitemaps.has(url) || allDiscoveredUrls.length > 1000) {\n    return;\n  }\n  \n  processedSitemaps.add(url);\n  console.log(`[W-3B] Parsing sitemap (depth ${depth}): ${url}`);\n  \n  const xml = await fetchSitemap.call(this, url);\n  if (!xml) return;\n  \n  const parsed = parseSitemap(xml);\n  console.log(`[W-3B] Found ${parsed.urls.length} URLs, ${parsed.sitemaps.length} child sitemaps`);\n  \n  // Add discovered URLs\n  allDiscoveredUrls = allDiscoveredUrls.concat(parsed.urls);\n  \n  // Recursively process child sitemaps\n  for (const childUrl of parsed.sitemaps) {\n    await processSitemap.call(this, childUrl, depth + 1);\n  }\n}\n\n// Process all known sitemaps\nfor (const sitemapUrl of sitemapUrls) {\n  await processSitemap.call(this, sitemapUrl, 0);\n}\n\n// Dedupe and filter\nconst uniqueUrls = [...new Set(allDiscoveredUrls)];\n\nconsole.log(`[W-3B] Total unique URLs discovered: ${uniqueUrls.length}`);\n\nif (uniqueUrls.length === 0) {\n  return [{ json: { domain_id, domain, _skip: true, urls_found: 0 }}];\n}\n\n// Return URLs for insertion (limit to 500 per run)\nreturn uniqueUrls.slice(0, 500).map(url => ({ json: { domain_id, domain, url }}));"
+            },
+            "id": "w3b-deep-parse",
+            "name": "Deep Parse Sitemaps",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1100,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "conditions": {
+                    "options": {
+                        "caseSensitive": true,
+                        "leftValue": "",
+                        "typeValidation": "strict"
+                    },
+                    "conditions": [
+                        {
+                            "id": "has-url",
+                            "leftValue": "={{ $json.url }}",
+                            "rightValue": "",
+                            "operator": {
+                                "type": "string",
+                                "operation": "notEmpty"
+                            }
+                        }
+                    ],
+                    "combinator": "and"
+                },
+                "options": {}
+            },
+            "id": "w3b-filter",
+            "name": "Filter Valid URLs",
+            "type": "n8n-nodes-base.if",
+            "typeVersion": 2,
+            "position": [
+                1300,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "INSERT INTO wellness.pages (domain_id, url, page_type)\nVALUES ($1::uuid, $2, 'content')\nON CONFLICT (domain_id, url) DO UPDATE SET \n  last_seen_at = NOW(),\n  page_type = CASE \n    WHEN wellness.pages.url ILIKE '%sitemap%' THEN 'sitemap'\n    WHEN wellness.pages.url ILIKE '%.jpg' OR wellness.pages.url ILIKE '%.png' OR wellness.pages.url ILIKE '%.gif' THEN 'image'\n    ELSE 'content'\n  END;",
+                "options": {
+                    "queryReplacement": "={{ [$json.domain_id, $json.url] }}"
+                }
+            },
+            "id": "w3b-upsert",
+            "name": "Upsert Pages",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.6,
+            "position": [
+                1500,
+                250
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "postgres-creds-id",
+                    "name": "Postgres account"
+                }
+            },
+            "continueOnFail": true
+        },
+        {
+            "parameters": {
+                "jsCode": "// Aggregate results - get domain from input items (each item has domain_id/domain)\nconst items = $input.all();\nconst urlsInserted = items.filter(i => i.json.url).length;\n\n// Get domain info from first item (all items have same domain)\nlet domain_id = '';\nlet domain = '';\nif (items.length > 0 && items[0].json) {\n  domain_id = items[0].json.domain_id || '';\n  domain = items[0].json.domain || '';\n}\n\nconsole.log(`[W-3B] Inserted ${urlsInserted} URLs for ${domain}`);\n\nreturn [{ json: { \n  domain_id: domain_id, \n  domain: domain, \n  urls_inserted: urlsInserted \n}}];"
+            },
+            "id": "w3b-aggregate",
+            "name": "Aggregate Results",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1700,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "jsCode": "return [{ json: { done: true }}];"
+            },
+            "id": "w3b-continue",
+            "name": "Continue",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1900,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "jsCode": "// Handle skip case - get domain from input item\nconst item = $input.item.json;\nreturn [{ json: { domain_id: item.domain_id || '', domain: item.domain || '', urls_inserted: 0 }}];"
+            },
+            "id": "w3b-skip-handler",
+            "name": "Handle Skip",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1500,
+                400
+            ]
+        },
+        {
+            "parameters": {},
+            "id": "w3b-done",
+            "name": "Done",
+            "type": "n8n-nodes-base.noOp",
+            "typeVersion": 1,
+            "position": [
+                700,
+                500
+            ]
+        }
+    ],
+    "connections": {
+        "Manual Trigger": {
+            "main": [
+                [
+                    {
+                        "node": "Get Domains with Sitemaps",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Get Domains with Sitemaps": {
+            "main": [
+                [
+                    {
+                        "node": "Split Domains",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Split Domains": {
+            "main": [
+                [
+                    {
+                        "node": "Prep Domain",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                [
+                    {
+                        "node": "Done",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Prep Domain": {
+            "main": [
+                [
+                    {
+                        "node": "Get Sitemap URLs",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Get Sitemap URLs": {
+            "main": [
+                [
+                    {
+                        "node": "Deep Parse Sitemaps",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Deep Parse Sitemaps": {
+            "main": [
+                [
+                    {
+                        "node": "Filter Valid URLs",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Filter Valid URLs": {
+            "main": [
+                [
+                    {
+                        "node": "Upsert Pages",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                [
+                    {
+                        "node": "Handle Skip",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Upsert Pages": {
+            "main": [
+                [
+                    {
+                        "node": "Aggregate Results",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Handle Skip": {
+            "main": [
+                [
+                    {
+                        "node": "Aggregate Results",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Aggregate Results": {
+            "main": [
+                [
+                    {
+                        "node": "Continue",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Continue": {
+            "main": [
+                [
+                    {
+                        "node": "Split Domains",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        }
+    },
+    "settings": {
+        "executionOrder": "v1"
+    },
+    "active": false
+}

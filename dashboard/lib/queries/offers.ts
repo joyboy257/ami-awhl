@@ -116,7 +116,7 @@ export async function getOffersData(params: QueryParams): Promise<OffersDTO & { 
     serviceName: o.service_name ?? 'N/A',
     offerType: o.offer_type ?? 'other',
     priceValue: o.price_value ?? 0,
-    priceDisplay: o.price_value ? `${o.price_currency}$${o.price_value}` : 'N/A',
+    priceDisplay: o.price_value ? `$${o.price_value}` : 'N/A',
     evidenceUrl: o.evidence_url,
   }));
 
@@ -127,31 +127,34 @@ export async function getOffersData(params: QueryParams): Promise<OffersDTO & { 
     offer_count: string;
   }>(`
     SELECT 
-      o.service_name,
+      COALESCE(o.service_name, 'Unspecified') as service_name,
       avg(o.price_value)::numeric as avg_price,
       count(*)::text as offer_count
     FROM wellness.clinic_offers o
     JOIN wellness.clinics c ON o.clinic_id = c.id
     JOIN wellness.verticals v ON c.vertical_id = v.id
-    WHERE o.price_value > 0 AND ${whereClause}
-    GROUP BY o.service_name
+    WHERE o.price_value > 0 AND o.service_name IS NOT NULL AND ${whereClause}
+    GROUP BY COALESCE(o.service_name, 'Unspecified')
     ORDER BY avg_price DESC
     LIMIT 10
   `, queryParams);
 
-  // Get trial leaderboard (cheapest trial offers)
+  // Get trial leaderboard (cheapest trial offers - one per clinic)
   const trialLeaderboard = await query<{
     clinic_name: string;
     price_value: number;
   }>(`
-    SELECT 
-      c.name as clinic_name,
-      o.price_value
-    FROM wellness.clinic_offers o
-    JOIN wellness.clinics c ON o.clinic_id = c.id
-    JOIN wellness.verticals v ON c.vertical_id = v.id
-    WHERE o.offer_type = 'trial' AND o.price_value > 0 AND ${whereClause.replace(/o\.offer_type = \$\d+/, '1=1')}
-    ORDER BY o.price_value ASC
+    SELECT clinic_name, price_value FROM (
+      SELECT DISTINCT ON (c.id)
+        c.name as clinic_name,
+        o.price_value
+      FROM wellness.clinic_offers o
+      JOIN wellness.clinics c ON o.clinic_id = c.id
+      JOIN wellness.verticals v ON c.vertical_id = v.id
+      WHERE o.offer_type = 'trial' AND o.price_value > 0 AND ${whereClause.replace(/o\.offer_type = \$\d+/, '1=1')}
+      ORDER BY c.id, o.price_value ASC
+    ) sub
+    ORDER BY price_value ASC
     LIMIT 10
   `, queryParams.filter((_, i) => !(offerType && offerType !== 'all' && i === queryParams.length - 1)));
 

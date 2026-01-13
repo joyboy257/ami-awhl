@@ -1,6 +1,6 @@
 import { Suspense } from 'react';
 import Link from 'next/link';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -25,6 +25,13 @@ import {
     ExternalLink,
     ArrowUpRight,
     ArrowDownRight,
+    AlertTriangle,
+    CheckCircle2,
+    XCircle,
+    Zap,
+    Target,
+    Trophy,
+    MessageCircle,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -86,6 +93,39 @@ function MetricCard({
     );
 }
 
+function InsightCard({
+    type,
+    icon,
+    message,
+    action,
+}: {
+    type: 'success' | 'warning' | 'danger' | 'info';
+    icon: string;
+    message: string;
+    action?: string;
+}) {
+    const colors = {
+        success: 'bg-success/10 border-success/30 text-success',
+        warning: 'bg-warning/10 border-warning/30 text-warning',
+        danger: 'bg-danger/10 border-danger/30 text-danger',
+        info: 'bg-primary/10 border-primary/30 text-primary',
+    };
+
+    return (
+        <div className={cn('p-4 rounded-lg border', colors[type])}>
+            <div className="flex items-start gap-3">
+                <span className="text-xl">{icon}</span>
+                <div className="flex-1">
+                    <p className="font-medium text-foreground">{message}</p>
+                    {action && (
+                        <p className="text-sm mt-1 opacity-80">→ {action}</p>
+                    )}
+                </div>
+            </div>
+        </div>
+    );
+}
+
 function ComparisonRow({
     metric,
     awhlAvg,
@@ -129,6 +169,14 @@ function ComparisonRow({
     );
 }
 
+function HealthCheck({ passed }: { passed: boolean }) {
+    return passed ? (
+        <CheckCircle2 className="h-5 w-5 text-success" />
+    ) : (
+        <XCircle className="h-5 w-5 text-danger" />
+    );
+}
+
 async function AWHLContent() {
     const data = await getAWHLDashboardData();
 
@@ -144,12 +192,32 @@ async function AWHLContent() {
                         <div>
                             <h1 className="text-2xl font-bold tracking-tight">AWHL Brands</h1>
                             <p className="text-muted-foreground">
-                                Performance overview of your 4 brands
+                                Strategic intelligence for your 4 brands
                             </p>
                         </div>
                     </div>
                 </div>
             </div>
+
+            {/* Key Insights - Executive Summary */}
+            {data.keyInsights.length > 0 && (
+                <Card className="border-2 border-primary/20">
+                    <CardHeader className="pb-3">
+                        <CardTitle className="flex items-center gap-2">
+                            <Zap className="h-5 w-5 text-primary" />
+                            Key Insights
+                        </CardTitle>
+                        <CardDescription>Critical findings requiring attention</CardDescription>
+                    </CardHeader>
+                    <CardContent>
+                        <div className="grid gap-3 md:grid-cols-2">
+                            {data.keyInsights.map((insight, i) => (
+                                <InsightCard key={i} {...insight} />
+                            ))}
+                        </div>
+                    </CardContent>
+                </Card>
+            )}
 
             {/* Summary metrics */}
             <div className="grid gap-4 md:grid-cols-4">
@@ -166,7 +234,7 @@ async function AWHLContent() {
                     trend={data.summary.scoreTrend}
                 />
                 <MetricCard
-                    title="Total Pages"
+                    title="Content Pages"
                     value={data.summary.totalPages.toLocaleString()}
                     subtitle="indexed across all brands"
                 />
@@ -176,6 +244,50 @@ async function AWHLContent() {
                     subtitle="across all brands"
                 />
             </div>
+
+            {/* Brand Health Matrix */}
+            <Card>
+                <CardHeader className="pb-3">
+                    <CardTitle className="flex items-center gap-2">
+                        <Target className="h-5 w-5" />
+                        Brand Health Matrix
+                    </CardTitle>
+                    <CardDescription>Quick status check across all brands</CardDescription>
+                </CardHeader>
+                <CardContent>
+                    <div className="overflow-x-auto">
+                        <Table>
+                            <TableHeader>
+                                <TableRow>
+                                    <TableHead>Brand</TableHead>
+                                    <TableHead className="text-center">CTAs</TableHead>
+                                    <TableHead className="text-center">WhatsApp</TableHead>
+                                    <TableHead className="text-center">Offers</TableHead>
+                                    <TableHead className="text-center">SERP Visible</TableHead>
+                                    <TableHead className="text-center">Content</TableHead>
+                                </TableRow>
+                            </TableHeader>
+                            <TableBody>
+                                {data.brandHealth.map((bh) => (
+                                    <TableRow key={bh.domain}>
+                                        <TableCell className="font-medium">
+                                            <div className="flex items-center gap-2">
+                                                <div className={cn('h-3 w-3 rounded-full', brandColors[bh.domain] || 'bg-primary')} />
+                                                {brandNames[bh.domain] || bh.domain}
+                                            </div>
+                                        </TableCell>
+                                        <TableCell className="text-center"><HealthCheck passed={bh.hasCtas} /></TableCell>
+                                        <TableCell className="text-center"><HealthCheck passed={bh.hasWhatsapp} /></TableCell>
+                                        <TableCell className="text-center"><HealthCheck passed={bh.hasOffers} /></TableCell>
+                                        <TableCell className="text-center"><HealthCheck passed={bh.hasSerpVisibility} /></TableCell>
+                                        <TableCell className="text-center"><HealthCheck passed={bh.hasContent} /></TableCell>
+                                    </TableRow>
+                                ))}
+                            </TableBody>
+                        </Table>
+                    </div>
+                </CardContent>
+            </Card>
 
             {/* Main grid */}
             <div className="grid gap-6 lg:grid-cols-3">
@@ -206,7 +318,7 @@ async function AWHLContent() {
                                     </div>
                                 </CardHeader>
                                 <CardContent>
-                                    <div className="grid grid-cols-3 gap-2 text-center">
+                                    <div className="grid grid-cols-4 gap-2 text-center">
                                         <div className="rounded-lg bg-muted/50 p-2">
                                             <Globe className="h-4 w-4 mx-auto text-muted-foreground" />
                                             <p className="text-lg font-bold mt-1">{brand.page_count}</p>
@@ -222,6 +334,11 @@ async function AWHLContent() {
                                             <p className="text-lg font-bold mt-1">{brand.offer_count}</p>
                                             <p className="text-xs text-muted-foreground">Offers</p>
                                         </div>
+                                        <div className="rounded-lg bg-muted/50 p-2">
+                                            <MessageCircle className="h-4 w-4 mx-auto text-muted-foreground" />
+                                            <p className="text-lg font-bold mt-1">{brand.whatsapp_count}</p>
+                                            <p className="text-xs text-muted-foreground">WhatsApp</p>
+                                        </div>
                                     </div>
                                     <div className="mt-3 pt-3 border-t flex items-center justify-between">
                                         <Badge variant="outline">{brand.vertical_name}</Badge>
@@ -235,20 +352,50 @@ async function AWHLContent() {
                             </Card>
                         ))}
                     </div>
-
-                    {data.brands.length === 0 && (
-                        <Card className="p-8 text-center">
-                            <Building2 className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
-                            <h3 className="font-semibold mb-2">Brands Not Found</h3>
-                            <p className="text-muted-foreground text-sm">
-                                AWHL domains haven&apos;t been discovered yet. Run the SERP pipeline (W-2) and Site Discovery (W-3) workflows to index your brands.
-                            </p>
-                        </Card>
-                    )}
                 </div>
 
                 {/* Right sidebar */}
                 <div className="space-y-6">
+                    {/* Quick Wins */}
+                    {data.quickWins.length > 0 && (
+                        <Card className="border-success/30">
+                            <CardHeader className="pb-3">
+                                <CardTitle className="flex items-center gap-2 text-success">
+                                    <Zap className="h-5 w-5" />
+                                    Quick Wins
+                                </CardTitle>
+                                <CardDescription>Immediate actions with high impact</CardDescription>
+                            </CardHeader>
+                            <CardContent>
+                                <div className="space-y-3">
+                                    {data.quickWins.slice(0, 5).map((win, i) => (
+                                        <div key={i} className="flex items-start gap-3 p-3 rounded-lg bg-muted/50">
+                                            <Badge
+                                                variant="outline"
+                                                className={cn(
+                                                    'shrink-0',
+                                                    win.priority === 'high' && 'bg-danger/15 text-danger border-danger/30',
+                                                    win.priority === 'medium' && 'bg-warning/15 text-warning border-warning/30',
+                                                    win.priority === 'low' && 'bg-muted'
+                                                )}
+                                            >
+                                                {win.priority}
+                                            </Badge>
+                                            <div className="flex-1 min-w-0">
+                                                <p className="font-medium text-sm">{win.action}</p>
+                                                <p className="text-xs text-muted-foreground">{win.brand}</p>
+                                            </div>
+                                            <div className="text-right shrink-0">
+                                                <p className="text-xs font-medium text-success">{win.impact}</p>
+                                                <p className="text-xs text-muted-foreground">{win.effort}</p>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </CardContent>
+                        </Card>
+                    )}
+
                     {/* vs Market comparison */}
                     <Card>
                         <CardHeader>
@@ -267,34 +414,164 @@ async function AWHLContent() {
                         </CardContent>
                     </Card>
 
-                    {/* Recent activity */}
-                    <Card>
-                        <CardHeader>
-                            <CardTitle className="text-lg">Recent Activity</CardTitle>
-                        </CardHeader>
-                        <CardContent>
-                            {data.recentActivity.length === 0 ? (
-                                <p className="text-muted-foreground text-sm">No recent activity.</p>
-                            ) : (
+                    {/* Competitor Threats */}
+                    {data.competitorThreats.length > 0 && (
+                        <Card className="border-danger/30">
+                            <CardHeader className="pb-3">
+                                <CardTitle className="flex items-center gap-2 text-danger">
+                                    <AlertTriangle className="h-5 w-5" />
+                                    Competitor Threats
+                                </CardTitle>
+                                <CardDescription>Non-AWHL brands outperforming yours</CardDescription>
+                            </CardHeader>
+                            <CardContent>
                                 <div className="space-y-3">
-                                    {data.recentActivity.map((activity) => (
-                                        <div key={activity.id} className="flex items-start gap-3 text-sm">
-                                            <div className={cn(
-                                                'mt-0.5 h-2 w-2 rounded-full',
-                                                brandColors[activity.brand] || 'bg-primary'
-                                            )} />
+                                    {data.competitorThreats.map((threat, i) => (
+                                        <div key={i} className="flex items-center justify-between p-3 rounded-lg bg-muted/50">
                                             <div>
-                                                <p className="font-medium">{brandNames[activity.brand] || activity.brand}</p>
-                                                <p className="text-muted-foreground">{activity.detail}</p>
+                                                <p className="font-medium text-sm">{threat.name}</p>
+                                                <p className="text-xs text-muted-foreground">{threat.keyAdvantage}</p>
+                                            </div>
+                                            <div className="text-right">
+                                                <ScoreBadge score={threat.score} />
+                                                <p className="text-xs text-danger mt-1">Beats {threat.beatsCount} brands</p>
                                             </div>
                                         </div>
                                     ))}
                                 </div>
-                            )}
-                        </CardContent>
-                    </Card>
+                            </CardContent>
+                        </Card>
+                    )}
                 </div>
             </div>
+
+            {/* Keywords Section */}
+            <div className="grid gap-6 lg:grid-cols-2">
+                {/* Top Keywords by Vertical */}
+                <Card>
+                    <CardHeader>
+                        <CardTitle className="flex items-center gap-2">
+                            <Trophy className="h-5 w-5" />
+                            Top Keywords by Vertical
+                        </CardTitle>
+                        <CardDescription>Highest competition keywords in each market</CardDescription>
+                    </CardHeader>
+                    <CardContent>
+                        <div className="space-y-6">
+                            {Object.entries(data.topKeywordsByVertical).map(([vertical, keywords]) => (
+                                <div key={vertical}>
+                                    <h4 className="font-semibold text-sm mb-2 flex items-center gap-2">
+                                        <Badge variant="outline">{vertical}</Badge>
+                                    </h4>
+                                    <div className="space-y-2">
+                                        {keywords.slice(0, 5).map((kw, i) => (
+                                            <div key={i} className="flex items-center justify-between text-sm p-2 rounded bg-muted/30">
+                                                <span className="truncate flex-1">{kw.query}</span>
+                                                <div className="flex items-center gap-2 shrink-0">
+                                                    <span className="text-xs text-muted-foreground">{kw.competingDomains} competitors</span>
+                                                    {kw.awhlBrand ? (
+                                                        <Badge variant="outline" className="bg-success/15 text-success border-success/30 text-xs">
+                                                            #{kw.awhlRanking} {brandNames[kw.awhlBrand] || 'AWHL'}
+                                                        </Badge>
+                                                    ) : (
+                                                        <Badge variant="outline" className="bg-danger/15 text-danger border-danger/30 text-xs">
+                                                            Not ranking
+                                                        </Badge>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </CardContent>
+                </Card>
+
+                {/* Brand Keyword Rankings */}
+                <Card>
+                    <CardHeader>
+                        <CardTitle className="flex items-center gap-2">
+                            <Search className="h-5 w-5" />
+                            AWHL Brand Keywords
+                        </CardTitle>
+                        <CardDescription>Keywords where your brands are ranking</CardDescription>
+                    </CardHeader>
+                    <CardContent>
+                        <div className="space-y-4">
+                            {Object.entries(data.brandKeywords).map(([domain, keywords]) => (
+                                <div key={domain}>
+                                    <h4 className="font-semibold text-sm mb-2 flex items-center gap-2">
+                                        <div className={cn('h-3 w-3 rounded-full', brandColors[domain] || 'bg-primary')} />
+                                        {brandNames[domain] || domain}
+                                        <Badge variant="secondary" className="ml-auto">{keywords.length} keywords</Badge>
+                                    </h4>
+                                    {keywords.length > 0 ? (
+                                        <div className="space-y-1">
+                                            {keywords.slice(0, 5).map((kw, i) => (
+                                                <div key={i} className="flex items-center justify-between text-sm p-2 rounded bg-muted/30">
+                                                    <span className="truncate flex-1 text-xs">{kw.query}</span>
+                                                    <div className="flex items-center gap-2 shrink-0">
+                                                        <Badge variant="outline" className="text-xs">{kw.vertical}</Badge>
+                                                        <Badge
+                                                            variant="outline"
+                                                            className={cn(
+                                                                'text-xs',
+                                                                kw.rank <= 3 && 'bg-success/15 text-success border-success/30',
+                                                                kw.rank > 3 && kw.rank <= 10 && 'bg-warning/15 text-warning border-warning/30',
+                                                                kw.rank > 10 && 'bg-muted'
+                                                            )}
+                                                        >
+                                                            #{kw.rank}
+                                                        </Badge>
+                                                    </div>
+                                                </div>
+                                            ))}
+                                            {keywords.length > 5 && (
+                                                <p className="text-xs text-muted-foreground text-center pt-1">
+                                                    +{keywords.length - 5} more keywords
+                                                </p>
+                                            )}
+                                        </div>
+                                    ) : (
+                                        <p className="text-sm text-muted-foreground">No SERP rankings found</p>
+                                    )}
+                                </div>
+                            ))}
+                            {Object.keys(data.brandKeywords).length === 0 && (
+                                <p className="text-muted-foreground text-center py-4">No keyword rankings data yet. Run SERP workflows to populate.</p>
+                            )}
+                        </div>
+                    </CardContent>
+                </Card>
+            </div>
+
+            {/* Recent activity */}
+            <Card>
+                <CardHeader>
+                    <CardTitle className="text-lg">Recent Activity</CardTitle>
+                </CardHeader>
+                <CardContent>
+                    {data.recentActivity.length === 0 ? (
+                        <p className="text-muted-foreground text-sm">No recent activity.</p>
+                    ) : (
+                        <div className="grid gap-3 md:grid-cols-5">
+                            {data.recentActivity.map((activity) => (
+                                <div key={activity.id} className="flex items-start gap-3 text-sm p-3 rounded-lg bg-muted/30">
+                                    <div className={cn(
+                                        'mt-0.5 h-2 w-2 rounded-full shrink-0',
+                                        brandColors[activity.brand] || 'bg-primary'
+                                    )} />
+                                    <div>
+                                        <p className="font-medium">{brandNames[activity.brand] || activity.brand}</p>
+                                        <p className="text-muted-foreground text-xs">{activity.detail}</p>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </CardContent>
+            </Card>
         </div>
     );
 }
@@ -309,11 +586,13 @@ function AWHLLoading() {
                     <Skeleton className="mt-2 h-4 w-64" />
                 </div>
             </div>
+            <Skeleton className="h-40" />
             <div className="grid gap-4 md:grid-cols-4">
                 {Array.from({ length: 4 }).map((_, i) => (
                     <Skeleton key={i} className="h-28" />
                 ))}
             </div>
+            <Skeleton className="h-32" />
             <div className="grid gap-6 lg:grid-cols-3">
                 <div className="lg:col-span-2 grid gap-4 sm:grid-cols-2">
                     {Array.from({ length: 4 }).map((_, i) => (

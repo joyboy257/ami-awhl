@@ -1,0 +1,350 @@
+{
+    "name": "W-4C: Breadth-First Link Crawler (AWHL)",
+    "nodes": [
+        {
+            "parameters": {},
+            "id": "w4c-trigger",
+            "name": "Manual Trigger",
+            "type": "n8n-nodes-base.manualTrigger",
+            "typeVersion": 1,
+            "position": [
+                100,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "-- Get AWHL pages that haven't been crawled yet\nSELECT p.id, p.url, p.domain_id, d.domain\nFROM wellness.pages p\nJOIN wellness.domains d ON p.domain_id = d.id\nWHERE d.domain IN ('haach.com', 'drhaach.com', 'natrahea.com.sg', 'guotaitcm.com')\n  AND p.page_type = 'content'\n  AND p.last_crawled_at IS NULL\nLIMIT 50;"
+            },
+            "id": "w4c-get-pages",
+            "name": "Get Uncrawled AWHL Pages",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.6,
+            "position": [
+                300,
+                300
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "postgres-creds-id",
+                    "name": "Postgres account"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "batchSize": 1,
+                "options": {}
+            },
+            "id": "w4c-split",
+            "name": "Split Pages",
+            "type": "n8n-nodes-base.splitInBatches",
+            "typeVersion": 3,
+            "position": [
+                500,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "jsCode": "// Store page context and prepare for HTTP fetch\nconst item = $input.item.json;\nreturn [{ json: {\n  page_id: item.id,\n  url: item.url,\n  domain_id: item.domain_id,\n  domain: item.domain\n}}];"
+            },
+            "id": "w4c-prep-fetch",
+            "name": "Prep Fetch",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                700,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "url": "={{ $json.url }}",
+                "options": {
+                    "timeout": 15000
+                }
+            },
+            "id": "w4c-fetch",
+            "name": "Fetch Page",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4.2,
+            "position": [
+                900,
+                300
+            ],
+            "continueOnFail": true
+        },
+        {
+            "parameters": {
+                "jsCode": "// Process HTTP response and extract links\n// Get page context from Prep Fetch node\nlet pageContext;\ntry {\n  pageContext = $('Prep Fetch').first().json;\n} catch (e) {\n  pageContext = { page_id: '', url: '', domain_id: '', domain: '' };\n}\n\nconst url = pageContext.url || '';\nconst domain_id = pageContext.domain_id || '';\nconst domain = pageContext.domain || '';\nconst page_id = pageContext.page_id || '';\n\n// Get HTTP response\nconst httpResponse = $input.item.json;\nlet html = '';\nlet status = 200;\n\n// Handle different response formats\nif (typeof httpResponse === 'string') {\n  html = httpResponse;\n} else if (httpResponse && httpResponse.data && typeof httpResponse.data === 'string') {\n  html = httpResponse.data;\n} else if (httpResponse && typeof httpResponse === 'object') {\n  // Try to find HTML in the response\n  const str = JSON.stringify(httpResponse);\n  if (str.length > 100 && (str.includes('<html') || str.includes('<!DOCTYPE') || str.includes('<body'))) {\n    // Response might be the HTML directly parsed as object (unlikely but check)\n    html = '';\n  }\n}\n\n// If no HTML found, mark as failed\nif (!html || html.length < 100) {\n  return [{ json: {\n    page_id, url, domain_id, domain,\n    success: false,\n    status: 0,\n    discovered_urls: []\n  }}];\n}\n\n// Extract title\nlet title = '';\nconst titleMatch = html.match(/<title[^>]*>([^<]+)<\\/title>/i);\nif (titleMatch) title = titleMatch[1].trim();\n\n// Extract all internal links\nconst discovered_urls = [];\nconst linkPattern = /href=[\"']([^\"']+)[\"']/gi;\nlet match;\n\nwhile ((match = linkPattern.exec(html)) !== null) {\n  let href = match[1].trim();\n  \n  // Skip non-http, anchors, javascript, etc.\n  if (href.startsWith('#') || href.startsWith('javascript:') || href.startsWith('mailto:') || href.startsWith('tel:')) {\n    continue;\n  }\n  \n  // Make relative URLs absolute\n  if (href.startsWith('/') && !href.startsWith('//')) {\n    href = `https://${domain}${href}`;\n  } else if (!href.startsWith('http')) {\n    continue;\n  }\n  \n  // Only include links to the same domain\n  try {\n    const urlObj = new URL(href);\n    const hrefDomain = urlObj.hostname.replace('www.', '');\n    if (hrefDomain === domain || hrefDomain.endsWith('.' + domain)) {\n      const cleanUrl = urlObj.origin + urlObj.pathname;\n      \n      // Skip non-content files\n      if (!cleanUrl.match(/\\.(jpg|jpeg|png|gif|webp|svg|ico|pdf|css|js|xml|json|woff|woff2|ttf|eot)$/i)) {\n        discovered_urls.push(cleanUrl);\n      }\n    }\n  } catch (e) {}\n}\n\n// Dedupe\nconst uniqueUrls = [...new Set(discovered_urls)].slice(0, 50);\n\nreturn [{ json: {\n  page_id,\n  url,\n  domain_id,\n  domain,\n  success: true,\n  status: 200,\n  title,\n  html_length: html.length,\n  discovered_urls: uniqueUrls\n}}];"
+            },
+            "id": "w4c-process",
+            "name": "Process Response",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1100,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "UPDATE wellness.pages SET last_crawled_at = NOW(), last_http_status = $2 WHERE id = $1::uuid RETURNING id;",
+                "options": {
+                    "queryReplacement": "={{ [$json.page_id, $json.status || 200] }}"
+                }
+            },
+            "id": "w4c-update-page",
+            "name": "Update Page Status",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.6,
+            "position": [
+                1300,
+                300
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "postgres-creds-id",
+                    "name": "Postgres account"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "jsCode": "// Get discovered URLs from Process Response (not from Update Page Status output)\nlet processData;\ntry {\n  processData = $('Process Response').first().json;\n} catch (e) {\n  processData = { discovered_urls: [], domain_id: '', domain: '' };\n}\n\nconst discovered_urls = processData.discovered_urls || [];\nconst domain_id = processData.domain_id || '';\nconst domain = processData.domain || '';\n\nif (discovered_urls.length === 0) {\n  return [{ json: { domain_id, domain, new_urls: 0 }}];\n}\n\n// Return each URL for insertion\nreturn discovered_urls.map(url => ({ json: { domain_id, domain, url }}));"
+            },
+            "id": "w4c-prep-insert",
+            "name": "Prep New URLs",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1500,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "conditions": {
+                    "options": {
+                        "caseSensitive": true,
+                        "leftValue": "",
+                        "typeValidation": "strict"
+                    },
+                    "conditions": [
+                        {
+                            "id": "has-url",
+                            "leftValue": "={{ $json.url }}",
+                            "rightValue": "",
+                            "operator": {
+                                "type": "string",
+                                "operation": "notEmpty"
+                            }
+                        }
+                    ],
+                    "combinator": "and"
+                },
+                "options": {}
+            },
+            "id": "w4c-filter",
+            "name": "Filter Has URL",
+            "type": "n8n-nodes-base.if",
+            "typeVersion": 2,
+            "position": [
+                1700,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "operation": "executeQuery",
+                "query": "INSERT INTO wellness.pages (domain_id, url, page_type)\nVALUES ($1::uuid, $2, 'content')\nON CONFLICT (domain_id, url) DO NOTHING;",
+                "options": {
+                    "queryReplacement": "={{ [$json.domain_id, $json.url] }}"
+                }
+            },
+            "id": "w4c-insert-url",
+            "name": "Insert Discovered URL",
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.6,
+            "position": [
+                1900,
+                250
+            ],
+            "credentials": {
+                "postgres": {
+                    "id": "postgres-creds-id",
+                    "name": "Postgres account"
+                }
+            },
+            "continueOnFail": true
+        },
+        {
+            "parameters": {
+                "jsCode": "return [{ json: { continue: true }}];"
+            },
+            "id": "w4c-continue",
+            "name": "Continue",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                2100,
+                300
+            ]
+        },
+        {
+            "parameters": {},
+            "id": "w4c-done",
+            "name": "Done",
+            "type": "n8n-nodes-base.noOp",
+            "typeVersion": 1,
+            "position": [
+                700,
+                500
+            ]
+        }
+    ],
+    "connections": {
+        "Manual Trigger": {
+            "main": [
+                [
+                    {
+                        "node": "Get Uncrawled AWHL Pages",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Get Uncrawled AWHL Pages": {
+            "main": [
+                [
+                    {
+                        "node": "Split Pages",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Split Pages": {
+            "main": [
+                [
+                    {
+                        "node": "Prep Fetch",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                [
+                    {
+                        "node": "Done",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Prep Fetch": {
+            "main": [
+                [
+                    {
+                        "node": "Fetch Page",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Fetch Page": {
+            "main": [
+                [
+                    {
+                        "node": "Process Response",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Process Response": {
+            "main": [
+                [
+                    {
+                        "node": "Update Page Status",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Update Page Status": {
+            "main": [
+                [
+                    {
+                        "node": "Prep New URLs",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Prep New URLs": {
+            "main": [
+                [
+                    {
+                        "node": "Filter Has URL",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Filter Has URL": {
+            "main": [
+                [
+                    {
+                        "node": "Insert Discovered URL",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                [
+                    {
+                        "node": "Continue",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Insert Discovered URL": {
+            "main": [
+                [
+                    {
+                        "node": "Continue",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Continue": {
+            "main": [
+                [
+                    {
+                        "node": "Split Pages",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        }
+    },
+    "settings": {
+        "executionOrder": "v1"
+    },
+    "active": false
+}

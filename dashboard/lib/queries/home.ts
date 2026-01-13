@@ -64,21 +64,24 @@ export async function getHomeData(filters: {
     WHERE offer_type = 'trial' AND price_value > 0
   `);
 
-  // Get threats (aggressive pricing moves)
+  // Get threats (aggressive pricing moves) - deduplicated by clinic
   const threats = await query<OfferRow & { offer_id: string }>(`
-    SELECT 
-      o.id as offer_id,
-      o.clinic_id,
-      c.name as clinic_name,
-      o.price_value,
-      o.offer_type,
-      left(o.evidence_snippet, 100) as evidence_snippet
-    FROM wellness.clinic_offers o
-    JOIN wellness.clinics c ON o.clinic_id = c.id
-    WHERE o.offer_type = 'trial' 
-      AND o.price_value < 100
-      AND o.extracted_at > NOW() - INTERVAL '7 days'
-    ORDER BY o.price_value ASC
+    SELECT offer_id, clinic_id, clinic_name, price_value, offer_type, evidence_snippet FROM (
+      SELECT DISTINCT ON (c.id)
+        o.id as offer_id,
+        o.clinic_id,
+        c.name as clinic_name,
+        o.price_value,
+        o.offer_type,
+        left(o.evidence_snippet, 100) as evidence_snippet
+      FROM wellness.clinic_offers o
+      JOIN wellness.clinics c ON o.clinic_id = c.id
+      WHERE o.offer_type = 'trial' 
+        AND o.price_value < 100
+        AND o.extracted_at > NOW() - INTERVAL '7 days'
+      ORDER BY c.id, o.price_value ASC
+    ) sub
+    ORDER BY price_value ASC
     LIMIT 5
   `);
 

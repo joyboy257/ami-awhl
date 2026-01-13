@@ -40,21 +40,25 @@ export async function getChangeRadarData(params: QueryParams): Promise<ChangeRad
 
     const whereClause = conditions.join(' AND ');
 
-    // Get recent offer events (new offers, price changes)
+    // Get recent offer events (aggregated by clinic per day to reduce noise)
     const offerEvents = await query<DBEvent>(`
     SELECT 
-      o.id::text,
+      (c.id::text || '-' || DATE(o.extracted_at)::text) as id,
       c.name as clinic_name,
       'new_offer' as event_type,
-      concat('New ', o.offer_type, ' offer: ', o.service_name, 
-             CASE WHEN o.price_value > 0 THEN concat(' at $', o.price_value::int) ELSE '' END) as detail,
-      o.extracted_at as event_time
+      CASE 
+        WHEN count(*) = 1 THEN concat('New ', min(o.offer_type), ' offer: ', min(o.service_name),
+             CASE WHEN min(o.price_value) > 0 THEN concat(' at $', min(o.price_value)::int) ELSE '' END)
+        ELSE concat(count(*), ' new offers added')
+      END as detail,
+      max(o.extracted_at) as event_time
     FROM wellness.clinic_offers o
     JOIN wellness.clinics c ON o.clinic_id = c.id
     JOIN wellness.verticals v ON c.vertical_id = v.id
     WHERE ${whereClause.replace('extracted_at', 'o.extracted_at')}
-    ORDER BY o.extracted_at DESC
-    LIMIT 20
+    GROUP BY c.id, c.name, DATE(o.extracted_at)
+    ORDER BY event_time DESC
+    LIMIT 15
   `, queryParams);
 
     // Get recent CTA events

@@ -98,7 +98,7 @@ function StatusBadge({ status }: { status: string }) {
 async function DataHealthContent() {
     const data = await getDataHealthData();
 
-    const { crawlStats, domainStats, recentRuns } = data;
+    const { crawlStats, contentBreakdown, domainStats, recentRuns } = data;
 
     return (
         <div className="space-y-6">
@@ -113,18 +113,18 @@ async function DataHealthContent() {
             {/* Metric cards */}
             <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
                 <MetricCard
-                    title="Total Pages"
-                    value={crawlStats.total.toLocaleString()}
-                    subtitle="indexed"
+                    title="Content Pages"
+                    value={contentBreakdown.contentPages.toLocaleString()}
+                    subtitle={`${contentBreakdown.pendingContent} pending`}
                     icon={<Database className="h-5 w-5" />}
-                    trend="neutral"
+                    trend={contentBreakdown.pendingContent === 0 ? 'good' : 'neutral'}
                 />
                 <MetricCard
-                    title="Crawl Success Rate"
-                    value={`${crawlStats.successRate}%`}
-                    subtitle={`${crawlStats.crawled} crawled`}
+                    title="Content Crawl Rate"
+                    value={`${contentBreakdown.contentSuccessRate}%`}
+                    subtitle={`${crawlStats.crawled.toLocaleString()} total crawled`}
                     icon={<Activity className="h-5 w-5" />}
-                    trend={crawlStats.successRate >= 80 ? 'good' : 'bad'}
+                    trend={contentBreakdown.contentSuccessRate >= 80 ? 'good' : contentBreakdown.contentSuccessRate >= 50 ? 'neutral' : 'bad'}
                 />
                 <MetricCard
                     title="Crawl Errors"
@@ -141,6 +141,51 @@ async function DataHealthContent() {
                     trend={domainStats.pending === 0 ? 'good' : 'neutral'}
                 />
             </div>
+
+            {/* Page Type Breakdown */}
+            <Card>
+                <CardHeader>
+                    <CardTitle className="text-lg">Page Type Breakdown</CardTitle>
+                </CardHeader>
+                <CardContent>
+                    <div className="grid gap-4 md:grid-cols-4">
+                        <div className="rounded-lg bg-success/10 p-4 text-center">
+                            <p className="text-2xl font-bold text-success">
+                                {contentBreakdown.contentPages.toLocaleString()}
+                            </p>
+                            <p className="text-sm text-muted-foreground">Content Pages</p>
+                            <p className="text-xs text-success mt-1">✓ Crawlable</p>
+                        </div>
+                        <div className="rounded-lg bg-muted p-4 text-center">
+                            <p className="text-2xl font-bold text-muted-foreground">
+                                {contentBreakdown.imageFiles.toLocaleString()}
+                            </p>
+                            <p className="text-sm text-muted-foreground">Image Files</p>
+                            <p className="text-xs text-muted-foreground mt-1">⏭ Skipped</p>
+                        </div>
+                        <div className="rounded-lg bg-muted p-4 text-center">
+                            <p className="text-2xl font-bold text-muted-foreground">
+                                {contentBreakdown.sitemapUrls.toLocaleString()}
+                            </p>
+                            <p className="text-sm text-muted-foreground">Sitemap URLs</p>
+                            <p className="text-xs text-muted-foreground mt-1">⏭ Metadata only</p>
+                        </div>
+                        <div className="rounded-lg bg-muted p-4 text-center">
+                            <p className="text-2xl font-bold text-muted-foreground">
+                                {contentBreakdown.otherAssets.toLocaleString()}
+                            </p>
+                            <p className="text-sm text-muted-foreground">Other Assets</p>
+                            <p className="text-xs text-muted-foreground mt-1">⏭ PDFs, CSS, JS</p>
+                        </div>
+                    </div>
+                    <div className="mt-4 p-3 rounded-lg bg-primary/5 border border-primary/20">
+                        <p className="text-sm">
+                            <span className="font-medium text-primary">{contentBreakdown.pendingContent.toLocaleString()}</span> content pages remaining to crawl.
+                            Non-content pages (images, sitemaps, assets) are correctly skipped by the crawler.
+                        </p>
+                    </div>
+                </CardContent>
+            </Card>
 
             {/* Domain discovery breakdown */}
             <Card>
@@ -168,6 +213,7 @@ async function DataHealthContent() {
                     </div>
                 </CardContent>
             </Card>
+
 
             {/* Recent runs */}
             <Card>

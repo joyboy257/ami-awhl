@@ -136,6 +136,14 @@ export interface DataHealthDTO {
         errors: number;
         successRate: number;
     };
+    contentBreakdown: {
+        contentPages: number;
+        imageFiles: number;
+        sitemapUrls: number;
+        otherAssets: number;
+        pendingContent: number;
+        contentSuccessRate: number;
+    };
     domainStats: {
         pending: number;
         inProgress: number;
