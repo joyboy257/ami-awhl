@@ -117,7 +117,7 @@ export async function getMarketMapData(params: QueryParams): Promise<MarketMapDT
         d.domain,
         c.competitor_score,
         c.score_confidence,
-        (SELECT count(*) FROM wellness.pages p WHERE p.domain_id = d.id)::text as page_count,
+        (SELECT count(*) FROM wellness.pages p WHERE p.domain_id = d.id AND p.page_type = 'content')::text as page_count,
         COALESCE((c.score_breakdown->'visibility'->>'normalized')::numeric, 0) as serp_visibility,
         -- Real SEO Hygiene score from page_seo data (0-100)
         -- Based on: title (25%), meta_description (25%), h1 (25%), canonical (25%)
