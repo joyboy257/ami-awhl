@@ -98,163 +98,178 @@ function StatusBadge({ status }: { status: string }) {
 async function DataHealthContent() {
     const data = await getDataHealthData();
 
-    const { crawlStats, contentBreakdown, domainStats, recentRuns } = data;
+    const { crawlStats, contentBreakdown, domainStats, verticalStats, serpStats, jobStats, recentRuns } = data;
 
     return (
         <div className="space-y-6">
-            {/* Page header */}
-            <div>
-                <h1 className="text-2xl font-bold tracking-tight">Data Health</h1>
-                <p className="text-muted-foreground">
-                    Pipeline status and data quality metrics
+            {/* CEO Summary Header */}
+            <div className="flex flex-col gap-2">
+                <h1 className="text-3xl font-bold tracking-tight">Full Database Report</h1>
+                <p className="text-lg text-muted-foreground max-w-2xl">
+                    Executive overview of AMI's digital assets, intelligence coverage, and pipeline performance.
                 </p>
             </div>
 
-            {/* Metric cards */}
+            {/* Top-level intelligence metrics */}
             <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
                 <MetricCard
-                    title="Content Pages"
-                    value={contentBreakdown.contentPages.toLocaleString()}
-                    subtitle={`${contentBreakdown.pendingContent} pending`}
+                    title="Clinics Tracked"
+                    value={verticalStats.reduce((acc, v) => acc + v.clinics, 0).toLocaleString()}
+                    subtitle="across all verticals"
                     icon={<Database className="h-5 w-5" />}
-                    trend={contentBreakdown.pendingContent === 0 ? 'good' : 'neutral'}
+                    trend="good"
                 />
                 <MetricCard
-                    title="Content Crawl Rate"
-                    value={`${contentBreakdown.contentSuccessRate}%`}
-                    subtitle={`${crawlStats.crawled.toLocaleString()} total crawled`}
-                    icon={<Activity className="h-5 w-5" />}
-                    trend={contentBreakdown.contentSuccessRate >= 80 ? 'good' : contentBreakdown.contentSuccessRate >= 50 ? 'neutral' : 'bad'}
-                />
-                <MetricCard
-                    title="Crawl Errors"
-                    value={crawlStats.errors}
-                    subtitle="pages with errors"
-                    icon={<XCircle className="h-5 w-5" />}
-                    trend={crawlStats.errors === 0 ? 'good' : 'bad'}
-                />
-                <MetricCard
-                    title="Domains Complete"
-                    value={domainStats.complete}
-                    subtitle={`of ${domainStats.pending + domainStats.inProgress + domainStats.complete}`}
+                    title="Search Keywords"
+                    value={verticalStats.reduce((acc, v) => acc + v.keywords, 0).toLocaleString()}
+                    subtitle="generating intelligence"
                     icon={<Globe className="h-5 w-5" />}
-                    trend={domainStats.pending === 0 ? 'good' : 'neutral'}
+                    trend="good"
+                />
+                <MetricCard
+                    title="SERP Data Points"
+                    value={serpStats.totalResults.toLocaleString()}
+                    subtitle={`from ${serpStats.totalSnapshots.toLocaleString()} snapshots`}
+                    icon={<Activity className="h-5 w-5" />}
+                    trend="good"
+                />
+                <MetricCard
+                    title="Discovery Pace"
+                    value={`${crawlStats.successRate}%`}
+                    subtitle="fetch success rate"
+                    icon={<CheckCircle2 className="h-5 w-5" />}
+                    trend={crawlStats.successRate >= 95 ? 'good' : 'neutral'}
                 />
             </div>
 
-            {/* Page Type Breakdown */}
+            <div className="grid gap-6 md:grid-cols-2">
+                {/* Vertical Coverage */}
+                <Card>
+                    <CardHeader>
+                        <CardTitle className="text-lg flex items-center gap-2">
+                            <Globe className="h-5 w-5 text-primary" />
+                            Market Coverage by Vertical
+                        </CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                        <Table>
+                            <TableHeader>
+                                <TableRow>
+                                    <TableHead>Vertical</TableHead>
+                                    <TableHead className="text-right">Clinics</TableHead>
+                                    <TableHead className="text-right">Keywords</TableHead>
+                                </TableRow>
+                            </TableHeader>
+                            <TableBody>
+                                {verticalStats.map((v) => (
+                                    <TableRow key={v.name}>
+                                        <TableCell className="font-medium">{v.name}</TableCell>
+                                        <TableCell className="text-right">{v.clinics.toLocaleString()}</TableCell>
+                                        <TableCell className="text-right">{v.keywords.toLocaleString()}</TableCell>
+                                    </TableRow>
+                                ))}
+                            </TableBody>
+                        </Table>
+                    </CardContent>
+                </Card>
+
+                {/* Job Queue Status */}
+                <Card>
+                    <CardHeader>
+                        <CardTitle className="text-lg flex items-center gap-2">
+                            <Activity className="h-5 w-5 text-primary" />
+                            Workload Queue Status
+                        </CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                        <Table>
+                            <TableHeader>
+                                <TableRow>
+                                    <TableHead>Job Type</TableHead>
+                                    <TableHead>State</TableHead>
+                                    <TableHead className="text-right">Count</TableHead>
+                                </TableRow>
+                            </TableHeader>
+                            <TableBody>
+                                {jobStats.length === 0 ? (
+                                    <TableRow>
+                                        <TableCell colSpan={3} className="text-center text-muted-foreground py-4">
+                                            Idle (All jobs processed)
+                                        </TableCell>
+                                    </TableRow>
+                                ) : (
+                                    jobStats.map((j, i) => (
+                                        <TableRow key={i}>
+                                            <TableCell className="capitalize">{j.type.replace(/_/g, ' ')}</TableCell>
+                                            <TableCell>
+                                                <Badge
+                                                    variant="secondary"
+                                                    className={cn(
+                                                        "text-[10px] px-1.5 py-0 leading-tight",
+                                                        j.state === 'available' ? 'bg-success/10 text-success border-success/20' : 'bg-muted text-muted-foreground'
+                                                    )}
+                                                >
+                                                    {j.state}
+                                                </Badge>
+                                            </TableCell>
+                                            <TableCell className="text-right font-mono">{j.count.toLocaleString()}</TableCell>
+                                        </TableRow>
+                                    ))
+                                )}
+                            </TableBody>
+                        </Table>
+                    </CardContent>
+                </Card>
+            </div>
+
+            {/* Run History */}
             <Card>
                 <CardHeader>
-                    <CardTitle className="text-lg">Page Type Breakdown</CardTitle>
-                </CardHeader>
-                <CardContent>
-                    <div className="grid gap-4 md:grid-cols-4">
-                        <div className="rounded-lg bg-success/10 p-4 text-center">
-                            <p className="text-2xl font-bold text-success">
-                                {contentBreakdown.contentPages.toLocaleString()}
-                            </p>
-                            <p className="text-sm text-muted-foreground">Content Pages</p>
-                            <p className="text-xs text-success mt-1">✓ Crawlable</p>
-                        </div>
-                        <div className="rounded-lg bg-muted p-4 text-center">
-                            <p className="text-2xl font-bold text-muted-foreground">
-                                {contentBreakdown.imageFiles.toLocaleString()}
-                            </p>
-                            <p className="text-sm text-muted-foreground">Image Files</p>
-                            <p className="text-xs text-muted-foreground mt-1">⏭ Skipped</p>
-                        </div>
-                        <div className="rounded-lg bg-muted p-4 text-center">
-                            <p className="text-2xl font-bold text-muted-foreground">
-                                {contentBreakdown.sitemapUrls.toLocaleString()}
-                            </p>
-                            <p className="text-sm text-muted-foreground">Sitemap URLs</p>
-                            <p className="text-xs text-muted-foreground mt-1">⏭ Metadata only</p>
-                        </div>
-                        <div className="rounded-lg bg-muted p-4 text-center">
-                            <p className="text-2xl font-bold text-muted-foreground">
-                                {contentBreakdown.otherAssets.toLocaleString()}
-                            </p>
-                            <p className="text-sm text-muted-foreground">Other Assets</p>
-                            <p className="text-xs text-muted-foreground mt-1">⏭ PDFs, CSS, JS</p>
-                        </div>
-                    </div>
-                    <div className="mt-4 p-3 rounded-lg bg-primary/5 border border-primary/20">
-                        <p className="text-sm">
-                            <span className="font-medium text-primary">{contentBreakdown.pendingContent.toLocaleString()}</span> content pages remaining to crawl.
-                            Non-content pages (images, sitemaps, assets) are correctly skipped by the crawler.
-                        </p>
-                    </div>
-                </CardContent>
-            </Card>
-
-            {/* Domain discovery breakdown */}
-            <Card>
-                <CardHeader>
-                    <CardTitle className="text-lg">Domain Discovery Status</CardTitle>
-                </CardHeader>
-                <CardContent>
-                    <div className="flex gap-4">
-                        <div className="flex-1 rounded-lg bg-muted p-4 text-center">
-                            <p className="text-2xl font-bold">{domainStats.pending}</p>
-                            <p className="text-sm text-muted-foreground">Pending</p>
-                        </div>
-                        <div className="flex-1 rounded-lg bg-primary/10 p-4 text-center">
-                            <p className="text-2xl font-bold text-primary">
-                                {domainStats.inProgress}
-                            </p>
-                            <p className="text-sm text-muted-foreground">In Progress</p>
-                        </div>
-                        <div className="flex-1 rounded-lg bg-success/10 p-4 text-center">
-                            <p className="text-2xl font-bold text-success">
-                                {domainStats.complete}
-                            </p>
-                            <p className="text-sm text-muted-foreground">Complete</p>
-                        </div>
-                    </div>
-                </CardContent>
-            </Card>
-
-
-            {/* Recent runs */}
-            <Card>
-                <CardHeader>
-                    <CardTitle className="text-lg">Recent Pipeline Runs</CardTitle>
+                    <CardTitle className="text-lg">Recent Pipeline Activity & Outcomes</CardTitle>
                 </CardHeader>
                 <CardContent>
                     {recentRuns.length === 0 ? (
                         <p className="text-muted-foreground">No runs recorded.</p>
                     ) : (
-                        <div className="rounded-lg border">
+                        <div className="rounded-lg border overflow-hidden">
                             <Table>
                                 <TableHeader>
-                                    <TableRow>
-                                        <TableHead>Run ID</TableHead>
+                                    <TableRow className="bg-muted/50">
+                                        <TableHead className="w-[100px]">Run ID</TableHead>
                                         <TableHead>Mode</TableHead>
                                         <TableHead>Status</TableHead>
-                                        <TableHead>Started</TableHead>
-                                        <TableHead>Ended</TableHead>
+                                        <TableHead>Outcomes / Summary</TableHead>
+                                        <TableHead className="text-right">Finished</TableHead>
                                     </TableRow>
                                 </TableHeader>
                                 <TableBody>
                                     {recentRuns.map((run) => (
                                         <TableRow key={run.id}>
-                                            <TableCell className="font-mono text-sm">
-                                                {run.id.slice(0, 8)}...
+                                            <TableCell className="font-mono text-[11px] text-muted-foreground">
+                                                {run.id.slice(0, 8)}
                                             </TableCell>
                                             <TableCell>
-                                                <Badge variant="outline">{run.mode}</Badge>
+                                                <Badge variant="outline" className="text-[10px]">{run.mode}</Badge>
                                             </TableCell>
                                             <TableCell>
                                                 <StatusBadge status={run.status} />
                                             </TableCell>
-                                            <TableCell className="text-muted-foreground">
-                                                {run.startedAt
-                                                    ? new Date(run.startedAt).toLocaleString()
-                                                    : '—'}
+                                            <TableCell className="text-sm">
+                                                {run.resultSummary ? (
+                                                    <div className="flex flex-wrap gap-2">
+                                                        {Object.entries(run.resultSummary).map(([key, value]) => (
+                                                            <span key={key} className="text-[11px] bg-primary/5 text-primary px-1.5 py-0.5 rounded border border-primary/10">
+                                                                <span className="opacity-70">{key.replace(/_/g, ' ')}:</span> {String(value)}
+                                                            </span>
+                                                        ))}
+                                                    </div>
+                                                ) : (
+                                                    <span className="text-muted-foreground text-xs">—</span>
+                                                )}
                                             </TableCell>
-                                            <TableCell className="text-muted-foreground">
+                                            <TableCell className="text-right text-xs text-muted-foreground">
                                                 {run.endedAt
-                                                    ? new Date(run.endedAt).toLocaleString()
+                                                    ? new Date(run.endedAt).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })
                                                     : '—'}
                                             </TableCell>
                                         </TableRow>
@@ -265,6 +280,63 @@ async function DataHealthContent() {
                     )}
                 </CardContent>
             </Card>
+
+            {/* Hygiene stats - Content and Domains */}
+            <div className="grid gap-6 md:grid-cols-2">
+                <Card>
+                    <CardHeader>
+                        <CardTitle className="text-lg">Crawler Inventory Hygiene</CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                        <div className="grid grid-cols-2 gap-4">
+                            <div className="space-y-1">
+                                <p className="text-xs text-muted-foreground">Content Coverage</p>
+                                <p className="text-xl font-bold">{contentBreakdown.contentSuccessRate}%</p>
+                                <div className="h-1.5 w-full bg-muted rounded-full overflow-hidden">
+                                    <div
+                                        className="h-full bg-success"
+                                        style={{ width: `${contentBreakdown.contentSuccessRate}%` }}
+                                    />
+                                </div>
+                            </div>
+                            <div className="space-y-1">
+                                <p className="text-xs text-muted-foreground">Pending Crawl</p>
+                                <p className="text-xl font-bold">{contentBreakdown.pendingContent.toLocaleString()}</p>
+                                <p className="text-[10px] text-muted-foreground">pages awaiting analysis</p>
+                            </div>
+                        </div>
+                    </CardContent>
+                </Card>
+
+                <Card>
+                    <CardHeader>
+                        <CardTitle className="text-lg">Domain Discovery Progress</CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                        <div className="flex items-center gap-2">
+                            <div className="h-3 flex-1 bg-success/20 rounded-sm overflow-hidden flex">
+                                <div className="h-full bg-success" style={{ width: `${(domainStats.complete / (domainStats.pending + domainStats.inProgress + domainStats.complete)) * 100 || 0}%` }} />
+                                <div className="h-full bg-primary" style={{ width: `${(domainStats.inProgress / (domainStats.pending + domainStats.inProgress + domainStats.complete)) * 100 || 0}%` }} />
+                            </div>
+                            <span className="text-xs font-medium">{domainStats.complete} / {domainStats.pending + domainStats.inProgress + domainStats.complete}</span>
+                        </div>
+                        <div className="mt-3 flex gap-4 text-[10px]">
+                            <div className="flex items-center gap-1">
+                                <span className="w-2 h-2 rounded-full bg-success" />
+                                <span className="text-muted-foreground">Complete</span>
+                            </div>
+                            <div className="flex items-center gap-1">
+                                <span className="w-2 h-2 rounded-full bg-primary" />
+                                <span className="text-muted-foreground">In Progress</span>
+                            </div>
+                            <div className="flex items-center gap-1">
+                                <span className="w-2 h-2 rounded-full bg-muted" />
+                                <span className="text-muted-foreground">Pending</span>
+                            </div>
+                        </div>
+                    </CardContent>
+                </Card>
+            </div>
         </div>
     );
 }

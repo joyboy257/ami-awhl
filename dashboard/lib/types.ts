@@ -149,12 +149,27 @@ export interface DataHealthDTO {
         inProgress: number;
         complete: number;
     };
+    verticalStats: Array<{
+        name: string;
+        clinics: number;
+        keywords: number;
+    }>;
+    serpStats: {
+        totalResults: number;
+        totalSnapshots: number;
+    };
+    jobStats: Array<{
+        type: string;
+        state: string;
+        count: number;
+    }>;
     recentRuns: Array<{
         id: string;
         mode: string;
         status: string;
         startedAt: string;
         endedAt: string | null;
+        resultSummary: any;
     }>;
     freshness: string;
 }
