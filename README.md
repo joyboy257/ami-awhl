@@ -1,159 +1,271 @@
-# AMI — AWHL Market Intelligence
+<p align="center">
+  <img src="docs/assets/ami-readme-hero.svg" alt="AMI — evidence-backed market intelligence" width="100%" />
+</p>
 
-> **Version 1.0.0** — January 2026
+<p align="center">
+  <a href="#dashboard-tour"><strong>Dashboard tour</strong></a>
+  &nbsp;&nbsp;·&nbsp;&nbsp;
+  <a href="#intelligence-pipeline"><strong>Pipeline</strong></a>
+  &nbsp;&nbsp;·&nbsp;&nbsp;
+  <a href="#data-and-evidence-model"><strong>Data model</strong></a>
+  &nbsp;&nbsp;·&nbsp;&nbsp;
+  <a href="#run-the-system"><strong>Run locally</strong></a>
+  &nbsp;&nbsp;·&nbsp;&nbsp;
+  <a href="docs/ami-master-plan.md"><strong>Master plan</strong></a>
+</p>
 
-## What is AMI?
+<p align="center">
+  <img src="https://img.shields.io/badge/product-competitive%20intelligence-0f172a" alt="Competitive intelligence" />
+  <img src="https://img.shields.io/badge/pipeline-discover%20%E2%86%92%20crawl%20%E2%86%92%20score-0f172a" alt="Intelligence pipeline" />
+  <img src="https://img.shields.io/badge/evidence-source--linked-1d4ed8" alt="Source-linked evidence" />
+  <img src="https://img.shields.io/badge/stack-Next.js%20%7C%20PostgreSQL%20%7C%20n8n-0f172a" alt="Next.js PostgreSQL n8n" />
+</p>
 
-AMI is our competitive intelligence platform that gives us a **live, evidence-backed view** of what every wellness competitor in Singapore is doing — their pricing, their marketing tactics, their SEO footprint, and their conversion strategies.
+<p align="center">
+  <strong>Turn a moving market into structured, source-backed decisions.</strong><br />
+  AMI automatically discovers competitors, crawls their digital footprint, extracts commercial and SEO signals, scores market position, monitors change, and surfaces the evidence through an executive intelligence dashboard.
+</p>
 
-Instead of manually checking competitor websites or relying on gut feelings, AMI automatically:
-- **Discovers** all competitor domains from Google search results
-- **Crawls** their websites to extract pricing, offers, and CTAs
-- **Scores** each competitor on a 0-100 scale across 5 dimensions
-- **Alerts** us when competitors make significant changes
+> [!NOTE]
+> AMI is a substantial internal product and data-pipeline prototype built for AWHL's Singapore wellness market. The repository contains the dashboard, database schema, workflow exports, crawl service, tests, and operating documentation. Hosted production deployment and some automated alerting remain roadmap work.
 
-The result? **We know what competitors are doing before they know we're watching.**
+## Recruiter quick scan
 
----
+| | |
+| --- | --- |
+| **What I built** | An evidence-first competitive intelligence system spanning search discovery, site crawling, data extraction, normalization, scoring, monitoring, and executive decision surfaces. |
+| **My role** | Product design, data architecture, workflow design, SQL schema, crawling strategy, scoring model, dashboard engineering, testing, and deployment planning. |
+| **Core challenge** | Convert noisy, changing public web data into comparable market facts while preserving provenance, freshness, and an auditable path back to source evidence. |
+| **Primary outputs** | Market overview, competitor map, battlecards, offers and pricing, keyword/SERP analysis, change radar, opportunities, threats, and data-health monitoring. |
+| **Stack** | Next.js 16, React 19, TypeScript, PostgreSQL, n8n, Python crawl service, Recharts, SQL migrations and assertions. |
+| **Engineering posture** | Idempotent workflow stages, normalized entities, crawl-policy controls, source-linked evidence, explicit data health, and reproducible scoring. |
 
-## Dashboard Screenshots
+## Dashboard tour
 
-The executive dashboard surfaces the insights that matter:
+<p align="center">
+  <img src="docs/assets/dashboard_audit_recording.webp" alt="AMI market intelligence dashboard walkthrough" width="94%" />
+</p>
 
-| Screen | Purpose |
-|--------|---------|
-| **Home** | 60-second market overview — visibility score, share of voice, threats & opportunities |
-| **Market Map** | Full competitor table — sortable, filterable, one-click deep-dive |
-| **Battlecards** | Individual competitor profiles — score breakdown, CTAs, pricing evidence |
-| **Offers & Pricing** | Price distribution charts, trial offer leaderboard, CTA mix analysis |
-| **Keywords & SERP** | Which keywords we're winning, which we're losing |
-| **Change Radar** | Real-time feed of competitor changes this week |
-| **Data Health** | Pipeline status so we know our data is fresh |
+| Surface | Decision it supports |
+| --- | --- |
+| **Home** | Understand visibility, share of voice, recent threats, and immediate opportunities in roughly one minute. |
+| **Market Map** | Compare and filter the full competitor set, then open a source-backed deep dive. |
+| **Battlecards** | Review one competitor's scores, offers, calls to action, positioning, and supporting evidence. |
+| **Offers & Pricing** | Compare price distributions, trial mechanics, discounting, and conversion tactics. |
+| **Keywords & SERP** | See where the organization wins or loses search visibility and which queries reveal new competitors. |
+| **Change Radar** | Review meaningful market changes since the previous observation window. |
+| **Data Health** | Inspect pipeline freshness, crawl coverage, extraction state, and broken or incomplete records. |
 
----
+AMI is designed to answer “what changed, why does it matter, and what evidence supports that conclusion?” rather than producing a static list of competitors.
 
-## Why We Built This
+## Intelligence pipeline
 
-Before AMI, competitive intelligence was:
-- **Manual** — Someone had to visit websites and update spreadsheets
-- **Stale** — By the time we noticed changes, competitors had moved on
-- **Incomplete** — We couldn't track dozens of competitors across hundreds of pages
-- **Opaque** — No evidence, just hunches
-
-Now it's:
-- **Automated** — Pipelines run daily without human intervention
-- **Fresh** — Data updates within 24 hours of competitor changes
-- **Comprehensive** — We track every competitor, every page, every offer
-- **Evidence-first** — Every insight links back to the source
-
----
-
-## How It Works
-
-```
-┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│   DISCOVER   │ ──▶ │    CRAWL     │ ──▶ │   EXTRACT    │
-│  (Google +   │     │  (Websites)  │     │  (AI + SQL)  │
-│  Sitemaps)   │     │              │     │              │
-└──────────────┘     └──────────────┘     └──────────────┘
-                                                │
-                                                ▼
-┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│   DASHBOARD  │ ◀── │    SCORE     │ ◀── │   NORMALIZE  │
-│  (Next.js)   │     │  (0-100)     │     │  (Clean DB)  │
-└──────────────┘     └──────────────┘     └──────────────┘
-```
-
-**8 automated workflows** power the system:
-1. **W-1** — Build search queries from verticals + services
-2. **W-2** — Run SERP snapshots to find competitors
-3. **W-3** — Discover sitemaps and pages per domain
-4. **W-4** — Crawl pages and store content
-5. **W-5** — Extract SEO signals and keywords
-6. **W-6** — Extract commercial facts (pricing, offers, CTAs)
-7. **W-7** — Score competitors on 5 dimensions
-8. **W-8** — Monitor for changes and expand discovery
-
----
-
-## Technology Stack
-
-| Layer | Technology | Why |
-|-------|------------|-----|
-| **Database** | PostgreSQL | Robust, proven, SQL-friendly |
-| **Workflows** | n8n | Visual, self-hosted, no-code automation |
-| **Dashboard** | Next.js 14 + Tailwind | Modern, fast, type-safe |
-| **Hosting** | Vercel + Supabase (proposed) | Zero-ops, global edge |
-
----
-
-## What's Next
-
-### Near-term
-- [ ] Deploy to Vercel + Supabase (see `docs/deployment-proposal.md`)
-- [ ] Add user authentication for dashboard access
-- [ ] Set up automated Slack/email alerts for high-severity changes
-
-### Medium-term
-- [ ] Expand to Malaysia and Indonesia markets
-- [ ] Add historical trend charts (price over time, rank over time)
-- [ ] Integrate with our CRM for lead scoring
-
-### Long-term
-- [ ] AI-generated competitive briefings
-- [ ] Predictive analysis (what will competitors do next?)
-
----
-
-## Project Structure
-
-```
-awhl-market-intel/
-├── dashboard/           # Next.js 14 frontend
-│   ├── app/             # App Router pages
-│   ├── components/      # React components
-│   └── lib/             # DB connection, queries
-├── n8n/
-│   └── workflows/       # W-1 through W-8 JSON exports
-├── sql/
-│   ├── migrations/      # Schema DDL
-│   └── seeds/           # Bootstrap data
-├── services/
-│   └── robots/          # Robots.txt microservice
-├── tests/
-│   └── sql/             # Data assertions
-└── docs/                # Documentation
+```text
+Verticals + services + locations
+              │
+              ▼
+1. Build search queries
+              │
+              ▼
+2. Capture SERP snapshots and discover domains
+              │
+              ▼
+3. Resolve robots.txt, sitemaps, and page inventory
+              │
+              ▼
+4. Route bounded depth and breadth crawls
+              │
+              ▼
+5. Extract SEO, keyword, page-type, and content signals
+              │
+              ▼
+6. Extract commercial facts: pricing, offers, CTAs, services
+              │
+              ▼
+7. Normalize and score competitors across comparable dimensions
+              │
+              ▼
+8. Monitor changes, expand discovery, and update dashboard projections
 ```
 
----
+The repository contains **13 n8n workflow exports** implementing the eight-stage program, including separate deep-sitemap, depth-crawl, breadth-first, SEO, keyword, and clinic-rollup lanes.
 
-## Getting Started (For Engineering)
+### Stage boundaries
+
+Each stage has a narrow responsibility:
+
+- discovery records how a domain entered the system;
+- page inventory separates known URLs from crawl attempts;
+- crawl storage retains response and content state;
+- extraction creates typed facts rather than dashboard-ready prose;
+- normalization reconciles entities and comparable units;
+- scoring derives explainable dimensions from stored facts;
+- monitoring compares observations over time;
+- dashboard queries project decisions without becoming the source of truth.
+
+## Data and evidence model
+
+The PostgreSQL model is organized around durable entities and observations:
+
+- verticals, services, locations, clinics, and domains;
+- SERP queries, snapshots, ranks, and discovered competitors;
+- sitemap and page inventories;
+- crawl attempts, page content, and page classification;
+- SEO and keyword observations;
+- commercial facts such as price, offer, service, and CTA evidence;
+- score dimensions and aggregate competitor scores;
+- workflow runs, data-health state, and monitoring events.
+
+Every insight should retain enough provenance to answer:
+
+1. Which source page or search result produced this fact?
+2. When was it observed?
+3. Which extraction or normalization path transformed it?
+4. Which inputs contributed to the score?
+5. Is the source still fresh and reachable?
+
+Read [`docs/data_strategy.md`](docs/data_strategy.md), [`docs/ami-db-analysis.md`](docs/ami-db-analysis.md), and [`ami_schema_v1.0.sql`](ami_schema_v1.0.sql).
+
+## Scoring and decision surfaces
+
+AMI models competitor position across five dimensions rather than collapsing the market into one opaque rank. The scoring layer is designed to be:
+
+- reproducible from stored observations;
+- comparable across competitors and time windows;
+- decomposable into dimension-level explanations;
+- explicit about missing or stale data;
+- linked back to the evidence that drove each component.
+
+The dashboard consumes these projections to surface:
+
+- visibility leaders and laggards;
+- share-of-voice gaps;
+- pricing and offer outliers;
+- conversion-pattern differences;
+- new entrants and material site changes;
+- threats requiring review;
+- opportunities with source evidence.
+
+## Crawl and reliability boundaries
+
+Public-web intelligence fails quickly when crawling is treated as a single HTTP request. AMI includes dedicated controls for:
+
+- robots.txt resolution and policy-aware routing;
+- sitemap indexes and nested sitemap discovery;
+- bounded depth and breadth-first crawl strategies;
+- domain validation and canonical identity;
+- duplicate-page and repeated-run handling;
+- response, content, and extraction status separation;
+- retryable versus terminal failure;
+- explicit freshness and data-health reporting.
+
+The Python robots service and its tests live under [`services/robots/`](services/robots/). Discovery and scoring assertions live under [`tests/sql/`](tests/sql/).
+
+## What this project demonstrates
+
+- **Applied data engineering:** multi-stage ingestion, normalized schemas, provenance, freshness, and idempotent workflow design.
+- **Applied AI extraction:** converting unstructured pages into typed commercial and SEO facts with validation boundaries.
+- **Search intelligence:** query generation, SERP observation, competitor discovery, rank and keyword analysis.
+- **Product analytics:** turning raw observations into explainable scores and decision-ready projections.
+- **Full-stack product engineering:** Next.js dashboard, API routes, typed query layer, charts, filters, evidence drawers, and operational health surfaces.
+- **Workflow engineering:** n8n orchestration, stage contracts, crawl routing, monitoring, and expansion loops.
+
+## Repository map
+
+```text
+ami-awhl/
+├── dashboard/              # Next.js intelligence dashboard and query layer
+├── n8n/workflows/          # 13 workflow exports across W-1 through W-8
+├── sql/migrations/         # Incremental PostgreSQL schema
+├── sql/seeds/              # Verticals, services, locations, and templates
+├── services/robots/        # Python robots.txt resolution service
+├── tests/sql/              # Schema, discovery, scoring, and monitor assertions
+├── docs/                   # Data, pipeline, deployment, UX, and runbook docs
+└── ami_schema_v1.0.sql     # Consolidated schema reference
+```
+
+## Run the system
+
+AMI is a multi-service system rather than a single-command demo. The dashboard can be started independently; the full intelligence loop also requires PostgreSQL and n8n.
+
+### Dashboard
 
 ```bash
-# 1. Clone the repo
 git clone https://github.com/joyboy257/ami-awhl.git
-cd ami-awhl
-
-# 2. Start database
-docker-compose up -d
-
-# 3. Run migrations
-psql -f sql/migrations/*.sql
-
-# 4. Start dashboard
-cd dashboard && npm install && npm run dev
-
-# 5. Import n8n workflows
-# (See n8n/README.md)
+cd ami-awhl/dashboard
+npm install
+npm run dev
 ```
 
----
+Configure the PostgreSQL connection expected by [`dashboard/lib/db.ts`](dashboard/lib/db.ts), then open `http://localhost:3000`.
 
-## Contact
+### Database
 
-**Built by:** Deon & the AWHL Engineering Team  
-**Questions?** Reach out on Slack or email.
+Apply migrations in numerical order to a development PostgreSQL database, then load the relevant seed files:
 
----
+```bash
+psql "$DATABASE_URL" -f sql/migrations/001_core_entities.sql
+# Continue through the remaining ordered migrations.
+psql "$DATABASE_URL" -f sql/seeds/seed_verticals.sql
+psql "$DATABASE_URL" -f sql/seeds/seed_services.sql
+psql "$DATABASE_URL" -f sql/seeds/seed_geo_sets.sql
+```
 
-*AMI v1.0.0 — Because knowing your competition is the first step to beating them.*
+Use [`docs/runbook.md`](docs/runbook.md) and [`docs/environment_summary.md`](docs/environment_summary.md) for the environment-specific path rather than applying production assumptions to a local database.
+
+### Workflows
+
+Import the workflow exports under [`n8n/workflows/`](n8n/workflows/) into a development n8n instance and configure credentials without committing secret values. The workflow guide is [`n8n/README.md`](n8n/README.md).
+
+## Verification
+
+```bash
+# Dashboard static checks and production build
+cd dashboard
+npm run lint
+npm run build
+
+# Robots service tests
+cd ../services/robots
+python -m pytest
+
+# Discovery smoke path
+cd ../..
+bash scripts/test-discovery.sh
+```
+
+SQL assertions for schema, discovery, scoring, and monitoring are stored under [`tests/sql/`](tests/sql/).
+
+## Current status
+
+| Area | Status |
+| --- | --- |
+| PostgreSQL schema and migrations | **Present** |
+| Eight-stage workflow program | **Present as 13 exported n8n workflows** |
+| Crawl-policy microservice | **Implemented with tests** |
+| Dashboard and decision surfaces | **Implemented** |
+| Evidence and data-health model | **Implemented in schema and UI foundations** |
+| Hosted Vercel/Supabase production deployment | **Proposed / not claimed as completed here** |
+| Automated external alerts | **Roadmap** |
+| Regional expansion and predictive analysis | **Roadmap** |
+
+The repository should be evaluated as a working intelligence product and pipeline foundation, not as a claim that every workflow is currently operating against a live production market dataset.
+
+## Documentation map
+
+| Topic | Start here |
+| --- | --- |
+| Product and system plan | [`docs/ami-master-plan.md`](docs/ami-master-plan.md) |
+| Data strategy | [`docs/data_strategy.md`](docs/data_strategy.md) |
+| Pipeline strategy | [`docs/pipeline_strategy.md`](docs/pipeline_strategy.md) |
+| Workflow overview | [`docs/workflow_overview.md`](docs/workflow_overview.md) |
+| Database analysis | [`docs/ami-db-analysis.md`](docs/ami-db-analysis.md) |
+| Dashboard UX audit | [`docs/dashboard-ux-audit.md`](docs/dashboard-ux-audit.md) |
+| Deployment proposal | [`docs/deployment-proposal.md`](docs/deployment-proposal.md) |
+| Operations runbook | [`docs/runbook.md`](docs/runbook.md) |
+
+## Origin
+
+AMI was built to replace manual competitor spreadsheets and episodic website checks with a repeatable, evidence-backed market observation system.
+
+The key product decision is that every useful competitive conclusion should remain connected to the public evidence and processing history that produced it.
